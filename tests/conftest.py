@@ -27,8 +27,16 @@ def run_robot(
 
         run_env = {**os.environ, **env}
     # Robot exits non-zero on test failure; that is expected in several fixtures.
-    cmd = [sys.executable, "-m", "robot", "--output", output,
-           "--outputdir", str(work_dir), str(suite)]
+    cmd = [
+        sys.executable,
+        "-m",
+        "robot",
+        "--output",
+        output,
+        "--outputdir",
+        str(work_dir),
+        str(suite),
+    ]
     subprocess.run(cmd, check=False, env=run_env)
     return work_dir / output
 

@@ -157,8 +157,18 @@ def test_premerged_source_is_deduplicated(robot, tmp_path):
     run2 = robot(FLAKY_SUITE, output="run2.xml", env={"RESULT": "pass"})
     merged = tmp_path / "merged.xml"
     subprocess.run(
-        [sys.executable, "-m", "robot.rebot", "--merge", "--output", str(merged),
-         "--outputdir", str(tmp_path), str(run1), str(run2)],
+        [
+            sys.executable,
+            "-m",
+            "robot.rebot",
+            "--merge",
+            "--output",
+            str(merged),
+            "--outputdir",
+            str(tmp_path),
+            str(run1),
+            str(run2),
+        ],
         check=False,
     )
 
@@ -224,4 +234,55 @@ def test_partial_output_tolerance(robot, tmp_path):
     results_dir = tmp_path / "allure-results"
     # Must not raise; recovers whatever the parser could read (possibly nothing).
     generate(truncated, results_dir, clean=True)
+    assert results_dir.is_dir()
+
+
+def test_playwright_trace_attachment(robot, tmp_path):
+    """Playwright trace.zip files in <outputdir>/browser/traces are attached by wallTime.
+
+    This test verifies that the trace attachment mechanism doesn't crash when
+    the traces directory exists. Real trace matching by wallTime is tested
+    in the integration test (tests/externals/test_robotframework_browser.py).
+    """
+    output_xml = robot("*** Test Cases ***\nTest\n    Log    hello")
+    traces_dir = tmp_path / "browser" / "traces"
+    traces_dir.mkdir(parents=True)
+
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    results = load_results(results_dir)
+    assert len(results) == 1
+    # No trace attachments expected since mock trace files don't have wallTime
+    trace_atts = [
+        a
+        for a in results[0].get("attachments", [])
+        if a["type"] == "application/vnd.allure.playwright-trace"
+    ]
+    assert len(trace_atts) == 0
+
+
+def test_playwright_trace_no_traces_dir(robot, tmp_path):
+    """No error when browser/traces directory doesn't exist."""
+    output_xml = robot("*** Test Cases ***\nTest\n    Log    hello")
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    results = load_results(results_dir)
+    assert len(results) == 1
+    assert results[0].get("attachments", []) == []
+
+
+def test_playwright_trace_empty_traces_dir(robot, tmp_path):
+    """No error when browser/traces exists but is empty."""
+    output_xml = robot("*** Test Cases ***\nTest\n    Log    hello")
+    traces_dir = tmp_path / "browser" / "traces"
+    traces_dir.mkdir(parents=True)
+
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    results = load_results(results_dir)
+    assert len(results) == 1
+    assert results[0].get("attachments", []) == []
     assert results_dir.is_dir()

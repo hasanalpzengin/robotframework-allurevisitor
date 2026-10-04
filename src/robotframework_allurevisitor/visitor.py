@@ -41,6 +41,10 @@ _IMAGE_MIME = {
     ".webp": "image/webp",
 }
 
+# Playwright trace attachment type (not yet in allure-python-commons enum)
+_PLAYWRIGHT_TRACE_MIME = "application/vnd.allure.playwright-trace"
+_PLAYWRIGHT_TRACE_EXT = ".zip"
+
 
 class AllureResultVisitor(ResultVisitor):
     """Convert a Robot Framework result tree into Allure result files."""
@@ -87,9 +91,7 @@ class AllureResultVisitor(ResultVisitor):
     def start_test(self, test) -> None:  # noqa: ANN001
         full_name = getattr(test, "full_name", None) or test.longname
         labels = suite_labels(full_name)
-        tag_labels, links = tag_labels_and_links(
-            test.tags, self._issue_pattern, self._link_pattern
-        )
+        tag_labels, links = tag_labels_and_links(test.tags, self._issue_pattern, self._link_pattern)
         labels += tag_labels
         labels += [
             Label(name=LabelType.FRAMEWORK, value="robotframework"),
@@ -121,6 +123,8 @@ class AllureResultVisitor(ResultVisitor):
             self._containers[-1].children.append(result.uuid)
 
     def end_test(self, test) -> None:  # noqa: ANN001
+        # Attach any Playwright trace files matching this test
+        self._attach_traces(test)
         self._steps.pop()
         self._logger.report_result(self._test)
         self._test = None
@@ -270,9 +274,7 @@ class AllureResultVisitor(ResultVisitor):
             mime = _IMAGE_MIME.get(resolved.suffix.lower(), "application/octet-stream")
             file_name = f"{uuid4()}-attachment{resolved.suffix.lower()}"
             self._logger.report_attached_file(str(resolved), file_name)
-            target.attachments.append(
-                Attachment(name=resolved.name, source=file_name, type=mime)
-            )
+            target.attachments.append(Attachment(name=resolved.name, source=file_name, type=mime))
             attached = True
         return attached
 
@@ -309,6 +311,83 @@ class AllureResultVisitor(ResultVisitor):
         if assign:
             name = f"{', '.join(assign)} = {name}"
         return name
+
+    # -------------------------------------------------------- Playwright traces
+    def _traces_dir(self) -> Path | None:
+        """Return the directory where robotframework-browser stores trace files.
+
+        The library writes traces to ``<outputdir>/browser/traces`` where
+        ``outputdir`` is the directory containing the ``output.xml``.
+        """
+        if self._source_dir is None:
+            return None
+        return self._source_dir / "browser" / "traces"
+
+    def _attach_traces(self, test) -> None:
+        """Attach Playwright trace files matching the given test.
+
+        robotframework-browser creates trace files with context UUID names.
+        We match them by their wallTime (context creation timestamp) falling
+        within the test's start/end time window.
+        """
+        if self._test is None:
+            return
+        traces_dir = self._traces_dir()
+        if traces_dir is None or not traces_dir.is_dir():
+            return
+
+        # Get test time window in milliseconds
+        test_start_ms = self._test.start
+        test_end_ms = self._test.stop
+        if test_start_ms is None or test_end_ms is None:
+            return
+
+        # Match trace files by wallTime
+        for trace_file in sorted(traces_dir.rglob("*.zip")):
+            if not trace_file.is_file():
+                continue
+            trace_wall_time = self._get_trace_wall_time(trace_file)
+            if trace_wall_time is not None and test_start_ms <= trace_wall_time <= test_end_ms:
+                self._attach_trace(trace_file)
+
+    def _get_trace_wall_time(self, trace_file: Path) -> int | None:
+        """Extract the wallTime from a trace.zip file's context-options event.
+
+        Returns the wallTime in milliseconds since epoch, or None if not found.
+        """
+        try:
+            import zipfile
+
+            with zipfile.ZipFile(trace_file, "r") as z:
+                for name in z.namelist():
+                    if name == "trace.trace":
+                        with z.open(name) as f:
+                            # Read first chunk to find context-options event
+                            content = f.read(8192).decode("utf-8", errors="replace")
+                            for line in content.split("\n"):
+                                if '"wallTime"' in line and '"type":"context-options"' in line:
+                                    import re
+
+                                    match = re.search(r'"wallTime":(\d+)', line)
+                                    if match:
+                                        return int(match.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _attach_trace(self, trace_file: Path) -> None:
+        """Attach a single Playwright trace file to the current test result."""
+        if self._test is None:
+            return
+        file_name = f"{uuid4()}-attachment{_PLAYWRIGHT_TRACE_EXT}"
+        self._logger.report_attached_file(str(trace_file), file_name)
+        self._test.attachments.append(
+            Attachment(
+                name=trace_file.name,
+                source=file_name,
+                type=_PLAYWRIGHT_TRACE_MIME,
+            )
+        )
 
 
 def generate(

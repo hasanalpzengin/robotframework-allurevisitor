@@ -13,6 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Generator versions the e2e tests run against (see tests/allure_cli.py).
+  ALLURE2_VERSION: "2.46.1"
+  ALLURE3_VERSION: "3.20.1"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -25,20 +30,71 @@ jobs:
           python-version: "3.13"
           enable-cache: true
 
+      # Allure 3 needs Node; Allure 2 (allure-commandline) needs Node + Java.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache npx Allure packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-allure-${{ env.ALLURE2_VERSION }}-${{ env.ALLURE3_VERSION }}
+
       - name: Sync dependencies
         run: uv sync --locked
 
       - name: Lint (ruff)
-        run: uv run ruff check .
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
 
-      - name: Test (pytest)
-        # The e2e test self-skips if no Allure generator can be resolved, so it
-        # never fails CI on environmental grounds; ubuntu runners ship Node + Java
-        # so the npx allure-commandline fallback typically runs it for real.
-        run: uv run pytest -v
+      - name: Test (pytest, Allure 2 + Allure 3)
+        # Generators are installed above, so an unavailable one is a failure, not a skip.
+        env:
+          ALLURE_REQUIRE_GENERATORS: "1"
+        run: uv run pytest -v -rs
 
       - name: Build distribution
         run: uv build
 
       - name: Check distribution metadata
         run: uv run --with twine twine check dist/*
+
+  browser:
+    # Real robotframework-browser run: Playwright traces end to end on both generators.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Sync dependencies (with browser group)
+        run: uv sync --locked --group browser
+
+      - name: Install Browser library dependencies and Chromium
+        run: uv run --group browser rfbrowser init chromium
+
+      - name: Test (browser traces)
+        env:
+          ALLURE_REQUIRE_GENERATORS: "1"
+        run: uv run --group browser pytest -m browser -v -rs

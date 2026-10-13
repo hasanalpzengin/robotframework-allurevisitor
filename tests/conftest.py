@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,8 +26,16 @@ def run_robot(
 
         run_env = {**os.environ, **env}
     # Robot exits non-zero on test failure; that is expected in several fixtures.
-    cmd = [sys.executable, "-m", "robot", "--output", output,
-           "--outputdir", str(work_dir), str(suite)]
+    cmd = [
+        sys.executable,
+        "-m",
+        "robot",
+        "--output",
+        output,
+        "--outputdir",
+        str(work_dir),
+        str(suite),
+    ]
     subprocess.run(cmd, check=False, env=run_env)
     return work_dir / output
 
@@ -59,40 +66,3 @@ def find_step(steps: list[dict], name: str) -> dict | None:
 @pytest.fixture
 def robot(tmp_path):
     return lambda text, **kw: run_robot(text, tmp_path, **kw)
-
-
-def resolve_allure_cli() -> list[str] | None:
-    """Return a command prefix that runs the Allure generator, or None.
-
-    Prefers an ``allure`` executable on PATH; otherwise falls back to
-    ``npx allure-commandline`` when both Node and Java are available.
-    """
-    if shutil.which("allure"):
-        return ["allure"]
-    if shutil.which("npx") and shutil.which("java"):
-        return ["npx", "--yes", "allure-commandline"]
-    return None
-
-
-def generate_allure_report(results_dir: Path, report_dir: Path, *, timeout: int = 300) -> None:
-    """Generate an Allure HTML report, skipping if no generator is available.
-
-    Skips (rather than fails) when the CLI cannot be resolved or cannot be
-    obtained/run for environmental reasons (e.g. ``npx`` cannot reach the
-    network), since those are not defects in the converter under test.
-    """
-    cli = resolve_allure_cli()
-    if cli is None:
-        pytest.skip("No Allure CLI available (no `allure` on PATH and no Node+Java for npx).")
-
-    cmd = [*cli, "generate", "--clean", "-o", str(report_dir), str(results_dir)]
-    try:
-        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError) as error:
-        pytest.skip(f"Allure report generation could not run ({cli[0]}): {error}")
-
-    if completed.returncode != 0 or not (report_dir / "index.html").is_file():
-        pytest.skip(
-            f"Allure generator ({cli[0]}) did not produce a report "
-            f"(exit {completed.returncode}): {completed.stderr.strip()[:500]}"
-        )

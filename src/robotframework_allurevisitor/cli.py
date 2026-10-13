@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from robotframework_allurevisitor.visitor import generate
 
@@ -17,6 +19,25 @@ def _expand(sources: list[str]) -> list[str]:
         matches = glob.glob(source)
         expanded.extend(matches or [source])
     return expanded
+
+
+def _environment_entry(text: str) -> tuple[str, str]:
+    key, separator, value = text.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE, got {text!r}")
+    return key, value
+
+
+def _executor(text: str) -> dict:
+    """Parse ``--executor`` as inline JSON or as a path to a JSON file."""
+    try:
+        raw = text if text.lstrip().startswith("{") else Path(text).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise argparse.ArgumentTypeError(f"invalid executor JSON ({error})") from error
+    if not isinstance(data, dict):
+        raise argparse.ArgumentTypeError("executor JSON must be an object")
+    return data
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -43,6 +64,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--issue-pattern", default=None, help="Pattern for issue links.")
     parser.add_argument("--link-pattern", default=None, help="Pattern for generic links.")
+    parser.add_argument(
+        "--broken-heuristic",
+        action="store_true",
+        help="Report library/syntax/import/timeout failures as broken instead of failed.",
+    )
+    parser.add_argument(
+        "--environment",
+        action="append",
+        type=_environment_entry,
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment entry for the report (repeatable); written to environment.properties.",
+    )
+    parser.add_argument(
+        "--executor",
+        type=_executor,
+        default=None,
+        help="Executor info as inline JSON or a JSON file path; written to executor.json.",
+    )
     args = parser.parse_args(argv)
 
     generate(
@@ -52,6 +92,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         thread=args.thread,
         issue_pattern=args.issue_pattern,
         link_pattern=args.link_pattern,
+        broken_heuristic=args.broken_heuristic,
+        environment=dict(args.environment),
+        executor=args.executor,
     )
     return 0
 

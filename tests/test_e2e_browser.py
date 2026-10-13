@@ -51,18 +51,26 @@ Shared Context B
 _UNAVAILABLE_HINTS = ("Executable doesn't exist", "rfbrowser init", "Could not connect")
 
 
-@pytest.fixture(scope="module")
-def browser_run(tmp_path_factory):
+def _run_browser_suites(work, extra_args=()):
     if importlib.util.find_spec("Browser") is None:
         pytest.skip("robotframework-browser is not installed (uv sync --group browser)")
-    work = tmp_path_factory.mktemp("browser")
     suites = work / "suites"
     suites.mkdir()
     (suites / "per_test.robot").write_text(PER_TEST_SUITE)
     (suites / "shared.robot").write_text(SHARED_SUITE)
     out = work / "out"
     completed = subprocess.run(
-        [sys.executable, "-m", "robot", "--outputdir", str(out), "--name", "Browser", str(suites)],
+        [
+            sys.executable,
+            "-m",
+            "robot",
+            "--outputdir",
+            str(out),
+            "--name",
+            "Browser",
+            *extra_args,
+            str(suites),
+        ],
         capture_output=True,
         text=True,
     )
@@ -72,8 +80,26 @@ def browser_run(tmp_path_factory):
         if any(hint in log for hint in _UNAVAILABLE_HINTS):
             pytest.skip("Browser library is installed but its browsers are not available")
         pytest.fail(f"Browser suite failed:\n{completed.stdout[-3000:]}")
+    return output_xml
+
+
+@pytest.fixture(scope="module")
+def browser_run(tmp_path_factory):
+    work = tmp_path_factory.mktemp("browser")
+    output_xml = _run_browser_suites(work)
     results_dir = work / "allure-results"
     generate(output_xml, results_dir, clean=True)
+    return work, results_dir
+
+
+@pytest.fixture(scope="module")
+def browser_listener_run(tmp_path_factory):
+    """Same suites with the live listener: traces are only written at Close Context."""
+    work = tmp_path_factory.mktemp("browser-listener")
+    results_dir = work / "allure-results"
+    _run_browser_suites(
+        work, ["--listener", f"robotframework_allurevisitor.Listener:{results_dir}"]
+    )
     return work, results_dir
 
 
@@ -104,6 +130,28 @@ def test_traces_in_reports(browser_run, generator):
     work, results_dir = browser_run
     report = generate_report(generator, results_dir, work / f"report-{generator}")
 
+    for case in report.test_cases():
+        setup_types = [a["type"] for fixture in case["setup"] for a in fixture["attachments"]]
+        assert TRACE_MIME in setup_types, f"{case['name']}: no trace in setup ({generator})"
+
+
+@pytest.mark.browser
+def test_listener_captures_traces(browser_listener_run):
+    _, results_dir = browser_listener_run
+    containers = {c["name"]: c for c in load_containers(results_dir)}
+    assert len(_trace_names(containers["Per Test Context"]["befores"])) == 1
+    # Suite-level context: the zip appears only at Suite Teardown's Close Context.
+    assert len(_trace_names(containers["Shared"]["befores"])) == 1
+    for name in ("Per Test Context", "Shared"):
+        for attachment in containers[name]["befores"][0]["attachments"]:
+            assert (results_dir / attachment["source"]).is_file()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("generator", GENERATORS)
+def test_listener_traces_in_reports(browser_listener_run, generator):
+    work, results_dir = browser_listener_run
+    report = generate_report(generator, results_dir, work / f"report-{generator}")
     for case in report.test_cases():
         setup_types = [a["type"] for fixture in case["setup"] for a in fixture["attachments"]]
         assert TRACE_MIME in setup_types, f"{case['name']}: no trace in setup ({generator})"

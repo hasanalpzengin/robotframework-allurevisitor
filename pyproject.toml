@@ -1,7 +1,7 @@
 [project]
 name = "robotframework-allurevisitor"
-version = "0.2.0"
-description = "Generate Allure input files from a Robot Framework output.xml — an offline alternative to the allure-robotframework listener."
+version = "0.3.0"
+description = "Allure 2/3 results for Robot Framework: convert output.xml or use the live listener that replaces allure-robotframework."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"

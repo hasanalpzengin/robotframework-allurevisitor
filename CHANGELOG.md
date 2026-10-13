@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-13
+
+A live listener that replaces `allure-robotframework`, sharing the converter's
+mapping.
+
+### Added
+- `robotframework_allurevisitor.Listener` (Robot listener API v3):
+  `robot --listener robotframework_allurevisitor.Listener[:DIR]` (default
+  `output/allure`), with `clean=True` and `broken_heuristic=True` options.
+  Its results equal converting the same run's `output.xml` with `rf-allure`.
+- Runtime data from Python libraries while the listener runs: `allure.attach`,
+  `allure.attach.file`, `allure.dynamic.*` (labels, links, title, description,
+  parameters), `allure.step` (failed for `AssertionError`, broken otherwise), and
+  global attachments/errors — each placed on the keyword step that made the call.
+- `robotframework_allurevisitor.AllureLibrary` keywords: `Attach`, `Attach File`,
+  `Global Attach`, `Global Attach File`, `Global Error`.
+- `--prerunmodifier robotframework_allurevisitor.testplan`
+  (`ALLURE_TESTPLAN_PATH`, select by `allure.id` or full name).
+- pabot `thread` labels, a warning when the upstream listener is also active, and
+  a [migration guide](https://github.com/manykarim/robotframework-allurevisitor/blob/main/docs/migration-from-allure-robotframework.md).
+- Final statuses are applied the way `log.html` shows them: a failing suite
+  setup/teardown also fails finished tests, including tests of child suites.
+
 ## [0.2.0] - 2026-10-13
 
 Allure 3 support, output parity with the `allure-robotframework` listener, and
@@ -65,5 +88,6 @@ Initial release.
 - Unit tests plus an end-to-end test that runs the full
   Robot → `rf-allure` → Allure report pipeline.
 
+[0.3.0]: https://github.com/manykarim/robotframework-allurevisitor/releases/tag/v0.3.0
 [0.2.0]: https://github.com/manykarim/robotframework-allurevisitor/releases/tag/v0.2.0
 [0.1.0]: https://github.com/manykarim/robotframework-allurevisitor/releases/tag/v0.1.0

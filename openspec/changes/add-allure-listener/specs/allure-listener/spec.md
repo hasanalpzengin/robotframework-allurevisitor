@@ -78,7 +78,7 @@ The listener SHALL add a `thread` label whose value is `<PABOTEXECUTIONPOOLID>-<
 
 #### Scenario: pabot workers
 - **WHEN** a suite set runs with pabot using two processes and the listener
-- **THEN** results carry two distinct `thread` label values and every test has exactly one result file
+- **THEN** every test has exactly one result file and the `thread` labels start with two distinct pool ids (`0-`, `1-`); like `allure-robotframework`, the `CALLER_ID` part differs per executed suite
 
 ### Requirement: Coexistence with the upstream listener
 

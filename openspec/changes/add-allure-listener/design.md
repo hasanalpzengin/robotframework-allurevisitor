@@ -45,6 +45,8 @@ A `RuntimeHooks` plugin (registered with `allure_commons.plugin_manager`) record
 ### D3. Status reconciliation by test id
 `end_suite` looks up each pending test by `result.tests` id and overwrites `status`/`statusDetails.message` when they differ, using the same `status_of` (incl. `skipped` tag, `broken_heuristic`). This reproduces what `ExecutionResult` gives the converter.
 
+Robot applies a **parent** suite's setup/teardown failure to descendant tests only at that parent's `end_suite`, after child suites were already written (verified on RF 7.4.2). So every `end_suite` compares the final status of `result.all_tests` with what was recorded (`rf id -> (uuid, status, message)`, a small index kept for the run): unwritten tests are updated in memory; already-written ones are patched in place, found by their `uuid` field because `AllureFileLogger` names files with a random uuid. This path only runs when an ancestor fixture failed.
+
 ### D4. Deferring sink
 The listener's `AttachmentSink` records `(owner attachment, source path, target name)` and copies on `end_suite` of the owning container (or `close`). Files missing at flush time are skipped with a Robot warning. This gives Close-Context traces and late screenshots a chance to exist.
 

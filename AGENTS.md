@@ -4,15 +4,17 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 ## What this project is
 
-`robotframework-allurevisitor` generates [Allure](https://allurereport.org/) input
-files from Robot Framework results. It is an **alternative to the
-`allure-robotframework` listener**: rather than hooking into a live test run, it
-post-processes an existing Robot Framework `output.xml` using Robot Framework's
-`ResultVisitor` API and writes Allure `*-result.json` files into a results
-directory.
+`robotframework-allurevisitor` generates [Allure](https://allurereport.org/) results
+(Allure 2 and 3) from Robot Framework through **one mapping with two front ends**:
 
-Use it when you have a Robot `output.xml` (e.g. from CI, a rerun, or a merged
-run) and want an Allure report without re-running the tests.
+- **Converter** (`generate()`, `rf-allure`): post-processes an existing
+  `output.xml` with Robot's `ResultVisitor` API — no re-run needed.
+- **Live listener** (`robotframework_allurevisitor.Listener`, API v3): replaces the
+  `allure-robotframework` listener and also records runtime-only data
+  (`allure.attach`, `allure.dynamic.*`, `allure.step`), plus `AllureLibrary`
+  keywords and the `testplan` pre-run modifier.
+
+For the same run both produce equivalent results (`tests/test_equivalence.py`).
 
 ## Tech stack & layout
 
@@ -25,9 +27,13 @@ run) and want an Allure report without re-running the tests.
 
 ```
 src/robotframework_allurevisitor/
-  __init__.py     # public API: AllureResultVisitor, generate
+  __init__.py     # public API: AllureResultVisitor, Listener, generate
   visitor.py      # stack-based ResultVisitor (traversal only) + generate()
-  _mapping.py     # Mapper: Robot node -> Allure object; AttachmentSink; messages, traces
+  listener.py     # Listener (API v3): convert at end_test, write at end_suite
+  _mapping.py     # Mapper: Robot node -> Allure object; (Deferred)AttachmentSink
+  _runtime.py     # Overlay (runtime items by Robot result id) + RuntimeHooks plugin
+  AllureLibrary.py # keywords Attach / Attach File / Global Attach(/File) / Global Error
+  testplan.py     # --prerunmodifier: select tests by allure.id / full name
   _convert.py     # timing (to_ms), status (status_of), identity, properties_text
   _labels.py      # suite_labels(), tag_labels_and_links() (parse_tag + legacy links)
   cli.py          # `rf-allure` / `allurevisitor` console entry point
@@ -41,7 +47,13 @@ tests/
   test_allure_cli.py       # readers agree on a fixed results dir (`e2e`)
   test_e2e_report.py       # status counts on Allure 2 + 3 (`e2e`)
   test_e2e_capabilities.py # every capability on Allure 2 + 3 (`e2e`)
-  test_e2e_browser.py      # real robotframework-browser traces (`browser`)
+  test_e2e_browser.py      # real robotframework-browser traces, converter + listener (`browser`)
+  test_listener.py         # listener entry point, status reconciliation, thread, coexistence
+  test_runtime_hooks.py    # allure.attach / dynamic / step placement (listener)
+  test_library_and_testplan.py # AllureLibrary keywords, testplan modifier
+  test_sinks.py            # immediate vs deferred attachment copies
+  test_equivalence.py      # listener output == converter output for one run
+  test_e2e_listener.py     # listener output on Allure 2 + 3 (`e2e`)
 ```
 
 ## Environment setup
@@ -128,10 +140,32 @@ labels, FAIL->failed, `skipped` tag); it keeps data-derived timestamps.
   warns instead of crashing. `ExecutionResult` parses eagerly, so an unparseable
   file recovers nothing — by design.
 
+## How the listener works
+
+- `end_test(data, result)` receives the test's full result tree; the listener
+  visits it with the same `AllureResultVisitor` (a `_Collector` holds the
+  result + per-test container instead of writing them).
+- `end_suite` visits the suite's setup/teardown (their bodies survive until
+  then; test bodies do not), applies the **final statuses** Robot assigns at
+  suite end (a failing suite fixture fails finished tests — and tests of child
+  suites already written, which are patched in place by their `uuid` field), then
+  flushes deferred attachment files and writes tests and containers.
+- `start_keyword`/`end_keyword` keep a stack of keyword result ids. `RuntimeHooks`
+  (an `allure_commons` plugin) records runtime calls into `Overlay` under the
+  running keyword's id; the visitor applies them when it builds that step
+  (`overlay.apply`) or the test (`overlay.apply_test`). Keyword ids from the
+  live run match the result tree.
+- `DeferredAttachmentSink` copies files at suite end, because e.g. a Playwright
+  trace exists only after `Close Context`; missing files are dropped with a warning.
+- `thread` = `<PABOTEXECUTIONPOOLID>-<CALLER_ID>` under pabot, else `default-<uuid>`.
+
 ## Conventions for changes
 
-- Keep mapping logic in `visitor.py`; keep conversion helpers in `_convert.py` /
-  `_labels.py`; keep `cli.py` thin.
+- Keep node mapping in `_mapping.py` and traversal in `visitor.py`, shared by
+  both front ends; keep conversion helpers in `_convert.py` / `_labels.py`; keep
+  `cli.py` and `listener.py` thin (event capture, buffering, reconciliation only).
+- A mapping change must keep `tests/test_equivalence.py` green: listener and
+  converter output for the same run must stay identical.
 - Robot model objects are duck-typed across RF versions — prefer `getattr(...)`
   with sensible fallbacks over hard attribute access.
 - Add/adjust a test in `tests/` for any behavior change. Tests run real Robot

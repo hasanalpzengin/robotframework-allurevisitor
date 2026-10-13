@@ -1,6 +1,6 @@
 [project]
 name = "robotframework-allurevisitor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generate Allure input files from a Robot Framework output.xml — an offline alternative to the allure-robotframework listener."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,6 +41,9 @@ rf-allure = "robotframework_allurevisitor.cli:main"
 allurevisitor = "robotframework_allurevisitor.cli:main"
 
 [dependency-groups]
+browser = [
+    "robotframework-browser>=20.6.0",
+]
 dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.15",
@@ -64,4 +67,5 @@ select = ["E", "F", "I", "UP", "B"]
 testpaths = ["tests"]
 markers = [
     "e2e: full Robot -> rf-allure -> Allure report pipeline test (needs an Allure CLI)",
+    "browser: real robotframework-browser run (needs `uv sync --group browser` + rfbrowser init)",
 ]

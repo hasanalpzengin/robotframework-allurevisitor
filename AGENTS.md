@@ -20,19 +20,28 @@ run) and want an Allure report without re-running the tests.
 - **Environment & dependencies are managed by [uv](https://docs.astral.sh/uv/).**
 - Runtime deps: `robotframework` (the `ResultVisitor`/`ExecutionResult` API) and
   `allure-python-commons` (the Allure model + file logger).
-- Dev deps (in the `dev` dependency group): `pytest`, `ruff`.
+- Dev deps (in the `dev` dependency group): `pytest`, `ruff`. Optional `browser`
+  group: `robotframework-browser` (only for the `browser` trace tests).
 
 ```
 src/robotframework_allurevisitor/
   __init__.py     # public API: AllureResultVisitor, generate
-  visitor.py      # stack-based ResultVisitor + generate(); -> AllureFileLogger
-  _convert.py     # timing (to_ms), status (status_of), identity (history_id)
-  _labels.py      # suite_labels(), tag_labels_and_links() via parse_tag
+  visitor.py      # stack-based ResultVisitor (traversal only) + generate()
+  _mapping.py     # Mapper: Robot node -> Allure object; AttachmentSink; messages, traces
+  _convert.py     # timing (to_ms), status (status_of), identity, properties_text
+  _labels.py      # suite_labels(), tag_labels_and_links() (parse_tag + legacy links)
   cli.py          # `rf-allure` / `allurevisitor` console entry point
 tests/
-  conftest.py        # run_robot()/load_results() + Allure-CLI resolver helpers
-  test_visitor.py    # runs real Robot suites, asserts the emitted Allure JSON
-  test_e2e_report.py # full pipeline -> real Allure report (`e2e` marker)
+  conftest.py              # run_robot()/load_results()/load_containers() helpers
+  allure_cli.py            # Allure 2/3 generator resolution + normalised report readers
+  test_visitor.py          # runs real Robot suites, asserts the emitted Allure JSON
+  test_labels.py           # suite labels, tag/link mapping
+  test_traces.py           # Playwright trace detection (no Browser needed)
+  test_cli.py              # CLI options, environment/executor files
+  test_allure_cli.py       # readers agree on a fixed results dir (`e2e`)
+  test_e2e_report.py       # status counts on Allure 2 + 3 (`e2e`)
+  test_e2e_capabilities.py # every capability on Allure 2 + 3 (`e2e`)
+  test_e2e_browser.py      # real robotframework-browser traces (`browser`)
 ```
 
 ## Environment setup
@@ -56,7 +65,8 @@ through them so the lockfile stays in sync.
 uv run pytest                 # run the test suite
 uv run ruff check .           # lint
 uv run ruff format .          # format
-uv run rf-allure OUTPUT_XML... -o RESULTS_DIR [--clean] [--thread ID]   # generate
+uv run rf-allure OUTPUT_XML... -o RESULTS_DIR [--clean] [--thread ID] \
+    [--broken-heuristic] [--environment K=V]... [--executor JSON]       # generate
 ```
 
 Programmatic use:
@@ -68,31 +78,46 @@ generate("output.xml", "allure-results", clean=True)
 
 ## How the visitor maps Robot -> Allure
 
+Output deliberately matches the upstream `allure-robotframework` listener where
+the difference is presentation only (fixtures, Keyword Log, `arg1..N`, suite
+labels, FAIL->failed, `skipped` tag); it keeps data-derived timestamps.
+
 - **Suites -> `TestResultContainer`** (`<uuid>-container.json`); Suite
   Setup/Teardown become the container's `befores`/`afters`. Child containers and
-  tests are linked via `children`.
+  tests are linked via `children`. **Each test also gets its own container**
+  (`children=[test uuid]`) holding its `[Setup]`/`[Teardown]` as befores/afters.
 - **Tests -> `TestResult`** (`<uuid>-result.json`).
 - **Keywords and control structures (FOR/IF/WHILE/TRY/GROUP/VAR/…) -> nested
   `TestStepResult`**, kept correctly nested via a traversal stack (`_steps`).
   Keyword assignment is folded into the step name; arguments become step
-  parameters.
-- Status (`status_of` in `_convert.py`): `PASS->passed`, `SKIP`/`NOT RUN->skipped`,
-  `FAIL->failed`, and library/import/syntax/timeout errors -> `broken`.
+  parameters `arg1..N`.
+- Status (`status_of` in `_convert.py`): `PASS->passed`,
+  `SKIP`/`NOT RUN`/`NOT SET->skipped`, `FAIL->failed`; library/import/syntax/timeout
+  errors -> `broken` only with `broken_heuristic`. A `skipped` tag forces skipped.
 - Times come from the result data via `to_ms` (epoch ms), **never** wall-clock —
   conversion is reproducible. RF 7 `datetime` and legacy RF 4-6 strings both work.
 - `historyId`/`testCaseId = md5(full_name)` (`history_id`) so Allure groups runs
   across reruns/CI.
-- Labels (`_labels.py`): `parentSuite`/`suite`/`subSuite` from the full name,
-  `framework`/`language`/`host`, optional `thread`, plus tag labels/links via
-  `allure_commons.mapping.parse_tag`.
-- Log messages -> HTML attachments on the owning step; embedded screenshots ->
-  binary attachments resolved relative to the `output.xml` directory.
+- Labels (`_labels.py`): `parentSuite`/`suite`/`subSuite` from the full name
+  (upstream `get_allure_suites` rules), `framework`/`language`/`host`, optional
+  `thread`, plus tag labels/links via `parse_tag` and the legacy
+  `issue:`/`tms:`/`link:` tags, de-duplicated with `labels_set`.
+- Log messages are buffered per stack frame and flushed at frame end as one
+  `Keyword Log` HTML attachment (or sub-steps, `ALLURE_MAX_STEP_MESSAGE_COUNT`);
+  plain text is HTML-escaped. Embedded screenshots -> image attachments resolved
+  relative to the `output.xml` directory.
+- Playwright traces: Browser's `trace file will be saved to: <zip>` message ->
+  `application/vnd.allure.playwright-trace` attachment on the owning frame;
+  fallback `<output.xml dir>/browser/traces/<name>`. Never timestamp matching.
+- All attachment files go through `AttachmentSink` (immediate copy here; a live
+  front end can defer copies).
 
 ## Key behaviors to preserve
 
-- **Suite setup/teardown detection** in `start_keyword` relies on
-  `kw.type in (SETUP, TEARDOWN)` while no test is active (`self._test is None`).
-  Test setup/teardown (test active) are emitted as ordinary steps.
+- **Fixture detection** in `start_keyword`: `kw.type in (SETUP, TEARDOWN)` and
+  either no test is active (suite fixture -> suite container) or the test is on
+  top of the stack (test fixture -> per-test container). A user keyword's own
+  `[Teardown]` has its keyword on top and stays a step.
 - **Control structures use `type`/attributes for labels, not `.name`** — `For.name`
   and `If.name` are deprecated and warn in RF 8.
 - **Multiple sources combine, they do NOT last-wins merge.**
@@ -115,16 +140,20 @@ generate("output.xml", "allure-results", clean=True)
 - Run `uv run ruff check .` and `uv run pytest` before declaring work done.
 - Target line length is 100 (`tool.ruff` in `pyproject.toml`).
 
-## End-to-end test (`e2e` marker)
+## End-to-end tests (`e2e` / `browser` markers)
 
-`test_e2e_report.py` runs Robot → the packaged `rf-allure` CLI (subprocess, so
-the entry point is exercised) → a real Allure report, then asserts the report's
-`widgets/summary.json` statistics and `data/test-cases/` count.
+The e2e tests run Robot → the packaged `rf-allure` CLI (subprocess, so the entry
+point is exercised) → real **Allure 2 and Allure 3** reports, parametrised over
+`GENERATORS` in `tests/allure_cli.py`.
 
 - Select/deselect with `uv run pytest -m e2e` / `-m "not e2e"`.
-- `resolve_allure_cli()` in `conftest.py` prefers `allure` on `PATH`, else
-  `npx allure-commandline` (needs Node + Java); `generate_allure_report()`
-  **skips** (never fails) when no generator is resolvable or it can't run — so
-  the converter is never blamed for a missing/broken external CLI.
-- Assert on report *data* (`summary.json`, `data/test-cases/`), not HTML, since
-  data is the stable cross-version contract.
+- `resolve_command()` picks an `allure` on `PATH` of the right major version,
+  else `npx allure@$ALLURE3_VERSION` / `npx allure-commandline@$ALLURE2_VERSION`.
+  Each generator is called with its own syntax (Allure 3 has no `--clean`).
+- Unresolvable generator -> **skip** (or fail with `ALLURE_REQUIRE_GENERATORS=1`,
+  as CI does); a resolved generator that exits non-zero -> **fail**.
+- Assert through `Report.stats()` / `test_cases()` / `environment()`, which
+  normalise Allure 2 (`widgets/summary.json`, `data/test-cases/`) and Allure 3
+  (`summary.json`, `data/test-results/`) data. Assert on data, never HTML.
+- `browser` tests need `uv sync --group browser` + `rfbrowser init chromium`
+  and skip when the Browser library or its browsers are unavailable.

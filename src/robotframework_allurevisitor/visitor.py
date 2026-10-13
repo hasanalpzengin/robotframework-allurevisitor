@@ -7,39 +7,22 @@ is bounded by the current suite/keyword depth rather than the whole run.
 
 from __future__ import annotations
 
-import re
+import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from allure_commons.logger import AllureFileLogger
 from allure_commons.model2 import (
-    Attachment,
-    Label,
-    Parameter,
     TestAfterResult,
     TestBeforeResult,
     TestResult,
     TestResultContainer,
-    TestStepResult,
 )
-from allure_commons.types import LabelType
-from allure_commons.utils import host_tag, platform_label, uuid4
 from robot.api import ExecutionResult, ResultVisitor
 
-from robotframework_allurevisitor._convert import history_id, status_of, to_ms
-from robotframework_allurevisitor._labels import suite_labels, tag_labels_and_links
-
-# Matches an <img src="..."> reference inside a Robot log message.
-_IMG_RE = re.compile(r"""<img[^>]+src=["']([^"']+)["']""", re.IGNORECASE)
-
-_IMAGE_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".svg": "image/svg+xml",
-    ".webp": "image/webp",
-}
+from robotframework_allurevisitor._convert import properties_text
+from robotframework_allurevisitor._mapping import AttachmentSink, Mapper, MappingOptions
 
 
 class AllureResultVisitor(ResultVisitor):
@@ -54,28 +37,30 @@ class AllureResultVisitor(ResultVisitor):
         thread: str | None = None,
         issue_pattern: str | None = None,
         link_pattern: str | None = None,
+        broken_heuristic: bool = False,
+        sink: AttachmentSink | None = None,
     ) -> None:
         self._logger = logger
-        self._source_dir = Path(source_dir) if source_dir else None
-        self._host = host or host_tag()
-        self._thread = thread
-        self._platform = platform_label()
-        self._issue_pattern = issue_pattern
-        self._link_pattern = link_pattern
-        self._containers: list[TestResultContainer] = []
-        self._steps: list = []  # stack of ExecutableItem (test / keyword / control)
+        self._mapper = Mapper(
+            sink or AttachmentSink(logger),
+            MappingOptions(
+                source_dir=Path(source_dir) if source_dir else None,
+                host=host,
+                thread=thread,
+                issue_pattern=issue_pattern,
+                link_pattern=link_pattern,
+                broken_heuristic=broken_heuristic,
+            ),
+        )
+        self._containers: list = []  # stack of suite TestResultContainer
+        self._steps: list = []  # stack of ExecutableItem (test / fixture / keyword / control)
+        self._messages: list[list] = []  # buffered log messages, parallel to _steps
         self._test: TestResult | None = None
+        self._test_container: TestResultContainer | None = None
 
     # ----------------------------------------------------------------- suites
     def start_suite(self, suite) -> None:  # noqa: ANN001
-        self._containers.append(
-            TestResultContainer(
-                uuid=uuid4(),
-                name=suite.name,
-                start=to_ms(suite.start_time),
-                stop=to_ms(suite.end_time),
-            )
-        )
+        self._containers.append(self._mapper.suite_container(suite))
 
     def end_suite(self, suite) -> None:  # noqa: ANN001
         container = self._containers.pop()
@@ -85,82 +70,43 @@ class AllureResultVisitor(ResultVisitor):
 
     # ------------------------------------------------------------------ tests
     def start_test(self, test) -> None:  # noqa: ANN001
-        full_name = getattr(test, "full_name", None) or test.longname
-        labels = suite_labels(full_name)
-        tag_labels, links = tag_labels_and_links(
-            test.tags, self._issue_pattern, self._link_pattern
-        )
-        labels += tag_labels
-        labels += [
-            Label(name=LabelType.FRAMEWORK, value="robotframework"),
-            Label(name=LabelType.LANGUAGE, value=self._platform),
-            Label(name=LabelType.HOST, value=self._host),
-        ]
-        if self._thread:
-            labels.append(Label(name=LabelType.THREAD, value=self._thread))
-
-        status, details = status_of(test)
-        result = TestResult(
-            uuid=uuid4(),
-            name=test.name,
-            fullName=full_name,
-            testCaseId=history_id(full_name),
-            historyId=history_id(full_name),
-            status=status,
-            statusDetails=details,
-            description=test.doc or None,
-            start=to_ms(test.start_time),
-            stop=to_ms(test.end_time),
-            labels=labels,
-            links=links,
-            titlePath=full_name.split(".")[:-1],
-        )
+        result = self._mapper.test_result(test)
         self._test = result
-        self._steps.append(result)
+        self._test_container = self._mapper.test_container(test, result)
+        self._push(result)
         if self._containers:
             self._containers[-1].children.append(result.uuid)
 
     def end_test(self, test) -> None:  # noqa: ANN001
-        self._steps.pop()
+        self._pop()
         self._logger.report_result(self._test)
+        self._logger.report_container(self._test_container)
         self._test = None
+        self._test_container = None
 
     # -------------------------------------------------------------- keywords
     def start_keyword(self, kw) -> None:  # noqa: ANN001
-        # Suite setup/teardown arrive as keywords while no test is active; they
-        # belong on the container as befores/afters rather than as steps.
-        if getattr(kw, "type", None) in ("SETUP", "TEARDOWN") and self._test is None:
-            factory = TestBeforeResult if kw.type == "SETUP" else TestAfterResult
-            status, details = status_of(kw)
-            item = factory(
-                name=kw.name,
-                status=status,
-                statusDetails=details,
-                start=to_ms(kw.start_time),
-                stop=to_ms(getattr(kw, "end_time", None)),
-            )
-            self._steps.append(item)
-            return
-
-        status, details = status_of(kw)
-        step = TestStepResult(
-            name=self._keyword_name(kw),
-            status=status,
-            statusDetails=details,
-            start=to_ms(kw.start_time),
-            stop=to_ms(getattr(kw, "end_time", None)),
+        # Suite and test setup/teardown arrive as SETUP/TEARDOWN keywords owned
+        # directly by the suite (no test active) or by the test (test on top of
+        # the stack). They become container befores/afters, not steps. A user
+        # keyword's own [Teardown] has its keyword on top and stays a step.
+        is_fixture = getattr(kw, "type", None) in ("SETUP", "TEARDOWN") and (
+            self._test is None or self._steps[-1] is self._test
         )
-        for index, arg in enumerate(getattr(kw, "args", ()) or ()):
-            step.parameters.append(Parameter(name=f"arg{index}", value=str(arg)))
+        if is_fixture:
+            self._push(self._mapper.fixture(kw))
+            return
+        step = self._mapper.keyword_step(kw)
         self._attach(step)
-        self._steps.append(step)
+        self._push(step)
 
     def end_keyword(self, kw) -> None:  # noqa: ANN001
-        item = self._steps.pop()
+        item = self._pop()
+        container = self._test_container if self._test is not None else self._containers[-1]
         if isinstance(item, TestBeforeResult):
-            self._containers[-1].befores.append(item)
+            container.befores.append(item)
         elif isinstance(item, TestAfterResult):
-            self._containers[-1].afters.append(item)
+            container.afters.append(item)
 
     # ------------------------------------------------------- control structures
     def start_for(self, item) -> None:  # noqa: ANN001
@@ -249,66 +195,31 @@ class AllureResultVisitor(ResultVisitor):
 
     # ------------------------------------------------------------- messages
     def visit_message(self, message) -> None:  # noqa: ANN001
-        target = self._steps[-1] if self._steps else self._test
-        if target is None:
-            return
-        if message.html and self._attach_images(target, message.message):
-            return
-        body = f"<p><b>[{message.level}]</b>&nbsp;{message.message}</p>"
-        file_name = f"{uuid4()}-attachment.html"
-        self._logger.report_attached_data(body, file_name)
-        target.attachments.append(
-            Attachment(name=f"Log [{message.level}]", source=file_name, type="text/html")
-        )
-
-    def _attach_images(self, target, html: str) -> bool:  # noqa: ANN001
-        attached = False
-        for src in _IMG_RE.findall(html):
-            resolved = self._resolve(src)
-            if resolved is None:
-                continue
-            mime = _IMAGE_MIME.get(resolved.suffix.lower(), "application/octet-stream")
-            file_name = f"{uuid4()}-attachment{resolved.suffix.lower()}"
-            self._logger.report_attached_file(str(resolved), file_name)
-            target.attachments.append(
-                Attachment(name=resolved.name, source=file_name, type=mime)
-            )
-            attached = True
-        return attached
-
-    def _resolve(self, src: str) -> Path | None:
-        path = Path(src)
-        if not path.is_absolute() and self._source_dir is not None:
-            path = self._source_dir / path
-        return path if path.is_file() else None
+        if self._steps:
+            self._mapper.message(self._steps[-1], message, self._messages[-1])
 
     # ------------------------------------------------------------- internals
     def _push_control(self, item, name: str) -> None:  # noqa: ANN001
-        status, details = status_of(item)
-        step = TestStepResult(
-            name=name,
-            status=status,
-            statusDetails=details,
-            start=to_ms(getattr(item, "start_time", None)),
-            stop=to_ms(getattr(item, "end_time", None)),
-        )
+        step = self._mapper.control_step(item, name)
         self._attach(step)
-        self._steps.append(step)
+        self._push(step)
 
     def _pop_control(self) -> None:
-        self._steps.pop()
+        self._pop()
 
-    def _attach(self, step: TestStepResult) -> None:
+    def _push(self, item) -> None:  # noqa: ANN001
+        self._steps.append(item)
+        self._messages.append([])
+
+    def _pop(self):  # noqa: ANN202
+        item = self._steps.pop()
+        self._mapper.flush_messages(item, self._messages.pop())
+        return item
+
+    def _attach(self, step) -> None:  # noqa: ANN001
         parent = self._steps[-1] if self._steps else self._test
         if parent is not None:
             parent.steps.append(step)
-
-    def _keyword_name(self, kw) -> str:  # noqa: ANN001
-        name = kw.name
-        assign = getattr(kw, "assign", None)
-        if assign:
-            name = f"{', '.join(assign)} = {name}"
-        return name
 
 
 def generate(
@@ -319,12 +230,19 @@ def generate(
     thread: str | None = None,
     issue_pattern: str | None = None,
     link_pattern: str | None = None,
+    broken_heuristic: bool = False,
+    environment: Mapping[str, str] | None = None,
+    executor: Mapping | None = None,
 ) -> None:
     """Convert one or more Robot ``output.xml`` sources into Allure results.
 
-    Multiple sources are merged using Robot Framework's native last-wins
-    semantics. A truncated ``output.xml`` is tolerated: whatever was completed
-    is still flushed.
+    Multiple sources are combined as sibling suites; tests sharing a full name
+    share a ``historyId``, so Allure groups them as retries (pre-merge with
+    ``rebot --merge`` for a single last-wins result). ``broken_heuristic``
+    reports library/syntax/import/timeout failures as ``broken`` instead of
+    ``failed``. ``environment`` is written to ``environment.properties`` and
+    ``executor`` to ``executor.json``, both shown by Allure 2 and 3. A truncated
+    ``output.xml`` is tolerated: whatever was completed is still flushed.
     """
     if isinstance(sources, (str, Path)):
         sources = [sources]
@@ -332,12 +250,15 @@ def generate(
     source_dir = Path(sources[0]).resolve().parent if sources else None
 
     logger = AllureFileLogger(str(results_dir), clean=clean)
+    # Written after the logger's clean so --clean does not remove them.
+    _write_metadata(Path(results_dir), environment, executor)
     visitor = AllureResultVisitor(
         logger,
         source_dir=source_dir,
         thread=thread,
         issue_pattern=issue_pattern,
         link_pattern=link_pattern,
+        broken_heuristic=broken_heuristic,
     )
     try:
         result = ExecutionResult(*sources)
@@ -349,4 +270,15 @@ def generate(
         print(
             f"warning: stopped early while converting {sources!r}: {error}",
             file=sys.stderr,
+        )
+
+
+def _write_metadata(results_dir: Path, environment, executor) -> None:  # noqa: ANN001
+    if environment:
+        (results_dir / "environment.properties").write_text(
+            properties_text(dict(environment)), encoding="latin-1"
+        )
+    if executor:
+        (results_dir / "executor.json").write_text(
+            json.dumps(dict(executor), ensure_ascii=False, indent=2), encoding="utf-8"
         )

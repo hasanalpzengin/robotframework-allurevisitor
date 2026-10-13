@@ -61,16 +61,21 @@ def _looks_like_error(item) -> bool:  # noqa: ANN001
     return any(hint in message for hint in _ERROR_HINTS)
 
 
-def status_of(item) -> tuple[str, StatusDetails | None]:  # noqa: ANN001
-    """Map a Robot status to an Allure ``(status, statusDetails)`` pair."""
+def status_of(item, *, broken_heuristic: bool = False) -> tuple[str, StatusDetails | None]:  # noqa: ANN001
+    """Map a Robot status to an Allure ``(status, statusDetails)`` pair.
+
+    Like the allure-robotframework listener, FAIL maps to ``failed``. With
+    ``broken_heuristic`` enabled, failures whose message looks like a library,
+    syntax, import, variable, or timeout error map to ``broken`` instead.
+    """
     status = getattr(item, "status", None)
     if status == "PASS":
         return Status.PASSED, None
-    if status in ("SKIP", "NOT RUN", "NOT_RUN"):
+    if status in ("SKIP", "NOT RUN", "NOT_RUN", "NOT SET", "NOT_SET"):
         return Status.SKIPPED, status_details(item)
     if status == "FAIL":
         details = status_details(item)
-        if _looks_like_error(item):
+        if broken_heuristic and _looks_like_error(item):
             return Status.BROKEN, details
         return Status.FAILED, details
     return Status.UNKNOWN, status_details(item)
@@ -83,3 +88,32 @@ def history_id(full_name: str, parameters=None) -> str:  # noqa: ANN001
         ordered = sorted(parameters, key=lambda p: (p.name or "", str(p.value)))
         parts += [f"{p.name}={p.value}" for p in ordered]
     return md5(*parts)
+
+
+def properties_text(entries: dict[str, str]) -> str:
+    """Render ``entries`` as a Java ``.properties`` document (what Allure 2 parses).
+
+    Separators and backslashes are escaped, and characters outside Latin-1 are
+    written as ``\\uXXXX`` because Java reads properties files as ISO-8859-1.
+    """
+
+    def escape(text: str, *, key: bool) -> str:
+        out = []
+        for char in str(text):
+            if char == "\\":
+                out.append("\\\\")
+            elif char == "\n":
+                out.append("\\n")
+            elif key and char in "=: ":
+                out.append("\\" + char)
+            elif ord(char) > 0xFF:
+                # Java strings are UTF-16: astral characters need a surrogate pair.
+                units = char.encode("utf-16-be")
+                out.extend(
+                    f"\\u{int.from_bytes(units[i : i + 2]):04x}" for i in range(0, len(units), 2)
+                )
+            else:
+                out.append(char)
+        return "".join(out)
+
+    return "".join(f"{escape(k, key=True)}={escape(v, key=False)}\n" for k, v in entries.items())

@@ -23,6 +23,7 @@ from robot.api import ExecutionResult, ResultVisitor
 
 from robotframework_allurevisitor._convert import properties_text
 from robotframework_allurevisitor._mapping import AttachmentSink, Mapper, MappingOptions
+from robotframework_allurevisitor._runtime import Overlay
 
 
 class AllureResultVisitor(ResultVisitor):
@@ -39,8 +40,11 @@ class AllureResultVisitor(ResultVisitor):
         link_pattern: str | None = None,
         broken_heuristic: bool = False,
         sink: AttachmentSink | None = None,
+        overlay: Overlay | None = None,
     ) -> None:
         self._logger = logger
+        # Runtime items from a live run (listener only); None when post-processing.
+        self._overlay = overlay
         self._mapper = Mapper(
             sink or AttachmentSink(logger),
             MappingOptions(
@@ -58,12 +62,18 @@ class AllureResultVisitor(ResultVisitor):
         self._test: TestResult | None = None
         self._test_container: TestResultContainer | None = None
 
+    @property
+    def mapper(self) -> Mapper:
+        """The node mapper (options are adjustable, e.g. by the live listener)."""
+        return self._mapper
+
     # ----------------------------------------------------------------- suites
     def start_suite(self, suite) -> None:  # noqa: ANN001
         self._containers.append(self._mapper.suite_container(suite))
 
     def end_suite(self, suite) -> None:  # noqa: ANN001
         container = self._containers.pop()
+        self._mapper.finish_container(container, suite)
         if self._containers:
             self._containers[-1].children.append(container.uuid)
         self._logger.report_container(container)
@@ -78,6 +88,8 @@ class AllureResultVisitor(ResultVisitor):
             self._containers[-1].children.append(result.uuid)
 
     def end_test(self, test) -> None:  # noqa: ANN001
+        if self._overlay is not None:
+            self._overlay.apply_test(test.id, self._test)
         self._pop()
         self._logger.report_result(self._test)
         self._logger.report_container(self._test_container)
@@ -101,6 +113,8 @@ class AllureResultVisitor(ResultVisitor):
         self._push(step)
 
     def end_keyword(self, kw) -> None:  # noqa: ANN001
+        if self._overlay is not None:
+            self._overlay.apply(kw.id, self._steps[-1])
         item = self._pop()
         container = self._test_container if self._test is not None else self._containers[-1]
         if isinstance(item, TestBeforeResult):

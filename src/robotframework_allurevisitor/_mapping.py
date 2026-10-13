@@ -67,16 +67,49 @@ class AttachmentSink:
         self._logger.report_attached_data(body, file_name)
         owner.attachments.append(Attachment(name=name, source=file_name, type=mime))
 
+    # Whether files are copied later, so they need not exist when attached.
+    defers_files = False
+
     def attach_file(self, owner, path: Path, *, name: str, mime: str) -> None:  # noqa: ANN001
         file_name = f"{uuid4()}-attachment{path.suffix.lower()}"
-        self._copy(path, file_name)
-        owner.attachments.append(Attachment(name=name, source=file_name, type=mime))
+        attachment = Attachment(name=name, source=file_name, type=mime)
+        owner.attachments.append(attachment)
+        self._copy(path, file_name, owner, attachment)
 
-    def _copy(self, path: Path, file_name: str) -> None:
+    def _copy(self, path: Path, file_name: str, owner, attachment: Attachment) -> None:  # noqa: ANN001
         self._logger.report_attached_file(str(path), file_name)
 
     def flush(self) -> None:
         """Copy any deferred files. Nothing is deferred here."""
+
+
+class DeferredAttachmentSink(AttachmentSink):
+    """Records file copies and performs them on :meth:`flush`.
+
+    A live run sees some attachments before their files exist (a Playwright trace
+    is written only when its context closes). Files still missing at flush time
+    are dropped from their owner, with a warning, instead of leaving a dangling
+    attachment.
+    """
+
+    defers_files = True
+
+    def __init__(self, logger, warn=None) -> None:  # noqa: ANN001
+        super().__init__(logger)
+        self._warn = warn or (lambda message: None)
+        self._pending: list[tuple[Path, str, object, Attachment]] = []
+
+    def _copy(self, path: Path, file_name: str, owner, attachment: Attachment) -> None:  # noqa: ANN001
+        self._pending.append((path, file_name, owner, attachment))
+
+    def flush(self) -> None:
+        pending, self._pending = self._pending, []
+        for path, file_name, owner, attachment in pending:
+            if path.is_file():
+                self._logger.report_attached_file(str(path), file_name)
+            else:
+                owner.attachments.remove(attachment)
+                self._warn(f"Allure attachment skipped, file not found: {path}")
 
 
 @dataclass
@@ -108,6 +141,13 @@ class Mapper:
     def status(self, item):  # noqa: ANN001, ANN201
         return status_of(item, broken_heuristic=self.options.broken_heuristic)
 
+    def test_status(self, test):  # noqa: ANN001, ANN201
+        """Status of a test, including the listener's ``skipped`` tag override."""
+        status, details = self.status(test)
+        if any(str(tag).lower() == "skipped" for tag in test.tags):
+            status = Status.SKIPPED
+        return status, details
+
     # ---------------------------------------------------------- containers
     def suite_container(self, suite) -> TestResultContainer:  # noqa: ANN001
         return TestResultContainer(
@@ -127,6 +167,11 @@ class Mapper:
             stop=result.stop,
         )
 
+    def finish_container(self, container: TestResultContainer, suite) -> None:  # noqa: ANN001
+        """Refresh times once the suite has ended (a live run starts without an end)."""
+        container.start = to_ms(suite.start_time)
+        container.stop = to_ms(suite.end_time)
+
     # --------------------------------------------------------------- tests
     def test_result(self, test) -> TestResult:  # noqa: ANN001
         full_name = getattr(test, "full_name", None) or test.longname
@@ -143,9 +188,7 @@ class Mapper:
         if self.options.thread:
             labels.append(Label(name=LabelType.THREAD, value=self.options.thread))
 
-        status, details = self.status(test)
-        if any(str(tag).lower() == "skipped" for tag in test.tags):
-            status = Status.SKIPPED
+        status, details = self.test_status(test)
         return TestResult(
             uuid=uuid4(),
             name=test.name,
@@ -211,7 +254,11 @@ class Mapper:
         if match is None:
             return
         logged = Path(match.group("path"))
-        trace = logged if logged.is_file() else self._relocated_trace(logged)
+        # A deferring sink copies later: the trace is only written when its context closes.
+        if logged.is_file() or self.sink.defers_files:
+            trace = logged
+        else:
+            trace = self._relocated_trace(logged)
         if trace is not None:
             self.sink.attach_file(owner, trace, name=trace.name, mime=PLAYWRIGHT_TRACE_MIME)
 

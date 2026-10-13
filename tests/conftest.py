@@ -16,8 +16,13 @@ def run_robot(
     *,
     output: str = "output.xml",
     env: dict[str, str] | None = None,
+    args: list[str] | None = None,
 ) -> Path:
-    """Write ``suite_text`` to a .robot file, run it, and return the output.xml path."""
+    """Write ``suite_text`` to a .robot file, run it, and return the output.xml path.
+
+    ``args`` are extra Robot options (e.g. ``--listener``). Robot runs with
+    ``work_dir`` as the working directory, so relative listener paths land there.
+    """
     suite = work_dir / "suite.robot"
     suite.write_text(suite_text)
     run_env = None
@@ -34,9 +39,10 @@ def run_robot(
         output,
         "--outputdir",
         str(work_dir),
+        *(args or []),
         str(suite),
     ]
-    subprocess.run(cmd, check=False, env=run_env)
+    subprocess.run(cmd, check=False, env=run_env, cwd=work_dir)
     return work_dir / output
 
 

@@ -4,15 +4,17 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/robotframework-allurevisitor.svg)](https://pypi.org/project/robotframework-allurevisitor/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/manykarim/robotframework-allurevisitor/blob/main/LICENSE)
 
-Generate [Allure](https://allurereport.org/) input files from Robot Framework
-results. It is an **offline alternative to the `allure-robotframework` listener**:
-instead of hooking into a live test run, it post-processes an existing Robot
-Framework `output.xml` via Robot Framework's `ResultVisitor` API and writes the
-same `*-result.json` / `*-container.json` / `*-attachment.*` files using the
-official `allure-python-commons` engine.
+Generate [Allure](https://allurereport.org/) results from Robot Framework, for
+Allure 2 and Allure 3. Two entry points share one Robot → Allure mapping and
+write the same `*-result.json` / `*-container.json` / `*-attachment.*` files via
+the official `allure-python-commons` engine:
 
-This is handy when you already have an `output.xml` (from CI, a rerun, or a
-pabot run) and want an Allure report without re-running the tests.
+- **`rf-allure`** post-processes an existing `output.xml` (from CI, a rerun, or a
+  pabot run) — no re-run needed.
+- **`robotframework_allurevisitor.Listener`** writes results during a run and also
+  records runtime-only data (`allure.attach`, `allure.dynamic.*`, `allure.step`).
+  It replaces the `allure-robotframework` listener; see the
+  [migration guide](https://github.com/manykarim/robotframework-allurevisitor/blob/main/docs/migration-from-allure-robotframework.md).
 
 ## Installation
 
@@ -63,6 +65,33 @@ from robotframework_allurevisitor import generate
 
 generate("output.xml", "allure-results", clean=True)
 ```
+
+### Live listener
+
+```bash
+robot --listener robotframework_allurevisitor.Listener tests/           # -> output/allure
+robot --listener robotframework_allurevisitor.Listener:build/allure tests/
+```
+
+Options follow the directory as `name=value`: `clean=True` empties the directory
+first; `broken_heuristic=True` reports library/syntax/import/timeout failures as
+`broken`. With the listener active, Python libraries can use the `allure` API and
+suites can use the keyword library:
+
+```robotframework
+*** Settings ***
+Library    robotframework_allurevisitor.AllureLibrary
+
+*** Test Cases ***
+Example
+    Attach         some text    name=note    attachment_type=TEXT
+    Attach File    ${OUTPUT DIR}/data.json    attachment_type=JSON
+```
+
+Select tests from an Allure test plan with
+`ALLURE_TESTPLAN_PATH=plan.json robot --prerunmodifier robotframework_allurevisitor.testplan …`.
+Coming from `allure-robotframework`? See the
+[migration guide](https://github.com/manykarim/robotframework-allurevisitor/blob/main/docs/migration-from-allure-robotframework.md).
 
 ### CLI options
 
@@ -121,8 +150,9 @@ listener.
 
 ### What cannot be converted
 
-`output.xml` only contains what Robot Framework logged. These listener-only
-features happen at runtime and are **not** recoverable by post-processing:
+`output.xml` only contains what Robot Framework logged. These features happen at
+runtime, so only the [live listener](#live-listener) records them; `rf-allure`
+cannot recover them from `output.xml`:
 
 - `AllureLibrary` keywords (`Attach`, `Attach File`, `Global Attach`, …) and
   `allure.attach(...)` / `allure.attach.file(...)` from Python libraries;

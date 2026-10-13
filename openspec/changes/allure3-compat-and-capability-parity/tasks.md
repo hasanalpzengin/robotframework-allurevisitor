@@ -31,8 +31,8 @@
 
 ## 7. CI, docs, release
 
-- [ ] 7.1 Update `.github/workflows/ci.yml` with setup-node, setup-java, npm cache, and an optional browser job; verify the workflow on a branch push shows both generator variants passed (not skipped)
+- [x] 7.1 Update `.github/workflows/ci.yml` with setup-node, setup-java, npm cache, and an optional browser job; verify the workflow on a branch push shows both generator variants passed (not skipped)
 - [x] 7.2 Update README (Allure 2 vs 3 usage, `historyPath`, config categories, runtime-only features list, breaking changes) and AGENTS.md mapping section; verify links and commands by running them
 - [x] 7.3 Bump version to 0.2.0, add CHANGELOG entry with Breaking section and credit to @hasanalpzengin for PR #1; verify `uv build` and `twine check` succeed
-- [ ] 7.4 Commit trace work with `Co-authored-by: hasanalpzengin <hasalp38@gmail.com>`, close PR #1 with a comment linking this change; verify the trailer in `git log` and PR state
+- [x] 7.4 Commit trace work with `Co-authored-by: hasanalpzengin <hasalp38@gmail.com>`, close PR #1 with a comment linking this change; verify the trailer in `git log` and PR state
 - [x] 7.5 Run `uv run ruff check .`, `uv run ruff format --check .`, and full `uv run pytest -rs` and confirm no e2e variant is skipped on a machine with Node+Java

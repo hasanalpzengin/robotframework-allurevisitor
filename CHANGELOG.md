@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-14
+
+Documentation only; no code changes from 0.4.0.
+
+### Changed
+- README (the PyPI project description): plain `rf-allure` usage after
+  `pip install`, the Robot Framework version floor, plain-text status messages,
+  the missing-screenshot warning, pabot trace locations, and an "Upgrading"
+  section with the 0.4.0 identity change.
+
 ## [0.4.0] - 2026-10-14
 
 pabot, re-executed tests, and both together, with Browser screenshots and traces,
@@ -120,6 +130,7 @@ Initial release.
 - Unit tests plus an end-to-end test that runs the full
   Robot → `rf-allure` → Allure report pipeline.
 
+[0.4.1]: https://github.com/manykarim/robotframework-allurevisitor/releases/tag/v0.4.1
 [0.4.0]: https://github.com/manykarim/robotframework-allurevisitor/releases/tag/v0.4.0
 [0.3.0]: https://github.com/manykarim/robotframework-allurevisitor/pull/4
 [0.2.0]: https://github.com/manykarim/robotframework-allurevisitor/pull/2

@@ -286,7 +286,7 @@ wheels = [
 
 [[package]]
 name = "robotframework-allurevisitor"
-version = "0.4.0"
+version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "allure-python-commons" },

@@ -30,6 +30,7 @@ Rendering the report additionally requires an Allure report generator — either
 ## Requirements
 
 - Python `>=3.13`
+- Robot Framework `>=7.4.2`
 - [uv](https://docs.astral.sh/uv/) for working on the project from source
 
 ## From source
@@ -43,8 +44,10 @@ uv sync
 Command line (`rf-allure`, with `allurevisitor` as an alias):
 
 ```bash
-uv run rf-allure path/to/output.xml -o allure-results --clean
+rf-allure path/to/output.xml -o allure-results --clean
 ```
+
+(From a source checkout, prefix it with `uv run`.)
 
 Then render the report with either generator:
 
@@ -133,6 +136,8 @@ listener.
   parameters `arg1..N`.
 - **Status**: `PASS→passed`, `SKIP`/`NOT RUN`/`NOT SET→skipped`, `FAIL→failed`.
   With `--broken-heuristic`, library/import/syntax/timeout errors → `broken`.
+  The status message is kept as plain text (Robot `*HTML*` messages, such as
+  `rebot --merge` notes, are converted), also for passed tests (`Pass Execution`).
 - **Timestamps** come from the result data (epoch ms), never wall-clock, so
   conversion is reproducible.
 - **Log messages → one `Keyword Log` HTML attachment per step** (FAIL/ERROR in
@@ -140,6 +145,8 @@ listener.
   to show steps with at most N messages as message sub-steps instead.
 - **Screenshots** embedded in log messages (`<img src=…>`, e.g. from SeleniumLibrary
   or Browser) → image attachments, resolved relative to the `output.xml` folder.
+  A screenshot file that cannot be found is reported as a warning and stays in the
+  `Keyword Log`.
 - **Playwright traces** from [robotframework-browser](https://robotframework-browser.org/)
   (`New Context    tracing=True`) → trace attachments
   (`application/vnd.allure.playwright-trace`) that open in the Playwright Trace
@@ -147,7 +154,8 @@ listener.
   `trace file will be saved to: …` log message and attached to the keyword or
   setup that opened the context — including contexts opened in Suite Setup. If
   the run's output folder was moved (e.g. a downloaded CI artifact), traces are
-  looked up in `browser/traces/` next to `output.xml`.
+  looked up next to `output.xml` in `browser/traces/`, in pabot's prefixed
+  `--artifacts` copies there, and in `pabot_results/*/browser/traces/`.
 
 ### What cannot be converted
 
@@ -163,9 +171,15 @@ cannot recover them from `output.xml`:
 
 Anything a library *logs* (screenshots, links, HTML) is converted.
 
-### Changes in 0.2.0
+### Upgrading
 
-0.2.0 aligns the output with `allure-robotframework` and changes some results
+**0.4.0**: several sources (`rf-allure original.xml rerun.xml`) are converted one
+by one instead of under a combined `Suites & Suites` root. Names, suite labels, and
+`historyId` now equal a single-run conversion, so results from earlier multi-source
+conversions do not line up in history with new ones. Single-source conversions are
+unchanged. See [Parallel runs and re-execution](#parallel-runs-and-re-execution).
+
+**0.2.0** aligns the output with `allure-robotframework` and changes some results
 compared with 0.1.0: test setup/teardown are fixtures instead of steps, log
 messages are aggregated per step, step parameters are `arg1..N` instead of
 `arg0..N`, deep suite hierarchies label like the listener, and failures are

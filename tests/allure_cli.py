@@ -77,10 +77,15 @@ class Report:
 
     # ------------------------------------------------------------- test cases
     def test_cases(self) -> list[dict]:
+        """Headline test cases; earlier attempts are counted in each case's ``retries``."""
         folder = "test-cases" if self.generator == "allure2" else "test-results"
         files = sorted((self.path / "data" / folder).glob("*.json"))
         reader = _allure2_case if self.generator == "allure2" else _allure3_case
-        return [reader(_read_json(f)) for f in files]
+        # Allure 2 marks earlier attempts "retry"; Allure 3 marks them "isRetry" (its own
+        # "retry" key is set on every attempt of a retried test).
+        flag = "retry" if self.generator == "allure2" else "isRetry"
+        raws = [_read_json(f) for f in files]
+        return [reader(raw) for raw in raws if not raw.get(flag)]
 
     def test_case(self, name: str) -> dict:
         matches = [case for case in self.test_cases() if case["name"] == name]
@@ -165,6 +170,7 @@ def _allure2_case(raw: dict) -> dict:
         "teardown": [_allure2_node(stage) for stage in raw.get("afterStages", [])],
         "steps": stage["steps"],
         "attachments": stage["attachments"],
+        "retries": len((raw.get("extra") or {}).get("retries") or []),
     }
 
 
@@ -195,6 +201,7 @@ def _allure3_case(raw: dict) -> dict:
         "teardown": [_allure3_node(item) for item in raw.get("teardown", [])],
         "steps": body["steps"],
         "attachments": body["attachments"],
+        "retries": len(raw.get("retries") or []),
     }
 
 

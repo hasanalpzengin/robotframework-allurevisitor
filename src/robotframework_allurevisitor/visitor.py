@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from allure_commons.logger import AllureFileLogger
@@ -20,9 +20,15 @@ from allure_commons.model2 import (
     TestResultContainer,
 )
 from robot.api import ExecutionResult, ResultVisitor
+from robot.result.merger import Merger
 
 from robotframework_allurevisitor._convert import properties_text
-from robotframework_allurevisitor._mapping import AttachmentSink, Mapper, MappingOptions
+from robotframework_allurevisitor._mapping import (
+    AttachmentSink,
+    Mapper,
+    MappingOptions,
+    rebot_merged,
+)
 from robotframework_allurevisitor._runtime import Overlay
 
 
@@ -41,8 +47,13 @@ class AllureResultVisitor(ResultVisitor):
         broken_heuristic: bool = False,
         sink: AttachmentSink | None = None,
         overlay: Overlay | None = None,
+        source_dir_for: Callable[[object], Path | None] | None = None,
     ) -> None:
         self._logger = logger
+        # Directory of the output.xml a test or suite fixture came from, when the
+        # tree mixes several sources (converter merge); None keeps ``source_dir``.
+        self._source_dir_for = source_dir_for
+        self._saved_source_dirs: list[Path | None] = []
         # Runtime items from a live run (listener only); None when post-processing.
         self._overlay = overlay
         self._mapper = Mapper(
@@ -80,6 +91,10 @@ class AllureResultVisitor(ResultVisitor):
 
     # ------------------------------------------------------------------ tests
     def start_test(self, test) -> None:  # noqa: ANN001
+        self._enter_source(test)
+        # Our own merge knows each test's directory; a rebot-merged file does not.
+        if self._source_dir_for is None and rebot_merged(test):
+            self._mapper.merged_from_elsewhere = test.name
         result = self._mapper.test_result(test)
         self._test = result
         self._test_container = self._mapper.test_container(test, result)
@@ -95,6 +110,8 @@ class AllureResultVisitor(ResultVisitor):
         self._logger.report_container(self._test_container)
         self._test = None
         self._test_container = None
+        self._mapper.merged_from_elsewhere = None
+        self._leave_source()
 
     # -------------------------------------------------------------- keywords
     def start_keyword(self, kw) -> None:  # noqa: ANN001
@@ -106,6 +123,8 @@ class AllureResultVisitor(ResultVisitor):
             self._test is None or self._steps[-1] is self._test
         )
         if is_fixture:
+            if self._test is None:
+                self._enter_source(kw)
             self._push(self._mapper.fixture(kw))
             return
         step = self._mapper.keyword_step(kw)
@@ -121,6 +140,8 @@ class AllureResultVisitor(ResultVisitor):
             container.befores.append(item)
         elif isinstance(item, TestAfterResult):
             container.afters.append(item)
+        if self._test is None and isinstance(item, (TestBeforeResult, TestAfterResult)):
+            self._leave_source()
 
     # ------------------------------------------------------- control structures
     def start_for(self, item) -> None:  # noqa: ANN001
@@ -213,6 +234,17 @@ class AllureResultVisitor(ResultVisitor):
             self._mapper.message(self._steps[-1], message, self._messages[-1])
 
     # ------------------------------------------------------------- internals
+    def _enter_source(self, item) -> None:  # noqa: ANN001
+        if self._source_dir_for is None:
+            return
+        options = self._mapper.options
+        self._saved_source_dirs.append(options.source_dir)
+        options.source_dir = self._source_dir_for(item) or options.source_dir
+
+    def _leave_source(self) -> None:
+        if self._source_dir_for is not None and self._saved_source_dirs:
+            self._mapper.options.source_dir = self._saved_source_dirs.pop()
+
     def _push_control(self, item, name: str) -> None:  # noqa: ANN001
         step = self._mapper.control_step(item, name)
         self._attach(step)
@@ -247,44 +279,98 @@ def generate(
     broken_heuristic: bool = False,
     environment: Mapping[str, str] | None = None,
     executor: Mapping | None = None,
+    merge: bool = False,
 ) -> None:
     """Convert one or more Robot ``output.xml`` sources into Allure results.
 
-    Multiple sources are combined as sibling suites; tests sharing a full name
-    share a ``historyId``, so Allure groups them as retries (pre-merge with
-    ``rebot --merge`` for a single last-wins result). ``broken_heuristic``
-    reports library/syntax/import/timeout failures as ``broken`` instead of
-    ``failed``. ``environment`` is written to ``environment.properties`` and
-    ``executor`` to ``executor.json``, both shown by Allure 2 and 3. A truncated
-    ``output.xml`` is tolerated: whatever was completed is still flushed.
+    Each source is converted on its own, so names and ``historyId`` match a
+    single-source conversion and attachments resolve against that source's
+    directory; tests repeated across sources (e.g. a ``--rerunfailed`` run) become
+    Allure retries. With ``merge`` the sources are merged like ``rebot --merge``
+    (last wins) into one result per test, each test keeping its own run's files.
+    ``broken_heuristic`` reports library/syntax/import/timeout failures as
+    ``broken`` instead of ``failed``. ``environment`` is written to
+    ``environment.properties`` and ``executor`` to ``executor.json``, both shown by
+    Allure 2 and 3. A truncated ``output.xml`` is tolerated: whatever was completed
+    is still flushed, and the other sources are still converted.
     """
     if isinstance(sources, (str, Path)):
         sources = [sources]
-    sources = [str(s) for s in sources]
-    source_dir = Path(sources[0]).resolve().parent if sources else None
+    paths = [Path(s) for s in sources]
 
     logger = AllureFileLogger(str(results_dir), clean=clean)
     # Written after the logger's clean so --clean does not remove them.
     _write_metadata(Path(results_dir), environment, executor)
-    visitor = AllureResultVisitor(
-        logger,
-        source_dir=source_dir,
-        thread=thread,
-        issue_pattern=issue_pattern,
-        link_pattern=link_pattern,
-        broken_heuristic=broken_heuristic,
-    )
+
+    def new_visitor(source_dir: Path, source_dir_for=None) -> AllureResultVisitor:  # noqa: ANN001
+        return AllureResultVisitor(
+            logger,
+            source_dir=source_dir,
+            thread=thread,
+            issue_pattern=issue_pattern,
+            link_pattern=link_pattern,
+            broken_heuristic=broken_heuristic,
+            source_dir_for=source_dir_for,
+        )
+
+    if merge:
+        _generate_merged(paths, new_visitor)
+        return
+    for path in paths:
+        # A fresh visitor per source: a failure in one source leaves no stale stack.
+        _convert_tolerantly(path, new_visitor(_dir_of(path)))
+
+
+def _generate_merged(paths: Sequence[Path], new_visitor) -> None:  # noqa: ANN001
+    """Merge like ``rebot --merge`` and remember which source each item came from."""
+    results = []
+    source_dirs: dict[int, Path] = {}
+    for path in paths:
+        try:
+            result = ExecutionResult(str(path))
+        except Exception as error:  # noqa: BLE001 - tolerate truncated/corrupt output.xml
+            _warn_stopped(path, error)
+            continue
+        directory = _dir_of(path)
+        # Robot's Merger moves these objects into the first tree unchanged
+        # (tests replace or join tests, suite fixtures replace fixtures).
+        for item in _source_items(result.suite):
+            source_dirs[id(item)] = directory
+        results.append((path, result))
+    if not results:
+        return
+    first_path, merged = results[0]
+    merger = Merger(merged, rpa=merged.rpa)
+    for _, other in results[1:]:
+        merger.merge(other)
+    # ``results`` keeps every source tree alive, so the ids above stay unique.
+    visitor = new_visitor(_dir_of(first_path), lambda item: source_dirs.get(id(item)))
+    _convert_tolerantly(first_path, visitor, merged)
+
+
+def _source_items(suite):  # noqa: ANN001, ANN202
+    yield suite.setup
+    yield suite.teardown
+    yield from suite.tests
+    for child in suite.suites:
+        yield from _source_items(child)
+
+
+def _convert_tolerantly(path: Path, visitor: AllureResultVisitor, result=None) -> None:  # noqa: ANN001
     try:
-        result = ExecutionResult(*sources)
-        result.visit(visitor)
+        (result if result is not None else ExecutionResult(str(path))).visit(visitor)
     except Exception as error:  # noqa: BLE001 - tolerate truncated/corrupt output.xml
         # Results/containers completed before the failure are already flushed by
-        # the file logger; emit a warning rather than aborting so CI still gets a
-        # partial Allure report.
-        print(
-            f"warning: stopped early while converting {sources!r}: {error}",
-            file=sys.stderr,
-        )
+        # the file logger; warn rather than abort so CI still gets a partial report.
+        _warn_stopped(path, error)
+
+
+def _warn_stopped(path: Path, error: Exception) -> None:
+    print(f"warning: stopped early while converting {str(path)!r}: {error}", file=sys.stderr)
+
+
+def _dir_of(path: Path) -> Path:
+    return path.resolve().parent
 
 
 def _write_metadata(results_dir: Path, environment, executor) -> None:  # noqa: ANN001

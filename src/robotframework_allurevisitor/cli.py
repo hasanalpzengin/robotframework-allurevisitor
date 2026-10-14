@@ -65,6 +65,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--issue-pattern", default=None, help="Pattern for issue links.")
     parser.add_argument("--link-pattern", default=None, help="Pattern for generic links.")
     parser.add_argument(
+        "--merge",
+        action="store_true",
+        help=(
+            "Merge the sources like `rebot --merge` (last wins) into one result per test. "
+            "Without it, tests repeated across sources become Allure retries."
+        ),
+    )
+    parser.add_argument(
         "--broken-heuristic",
         action="store_true",
         help="Report library/syntax/import/timeout failures as broken instead of failed.",
@@ -95,6 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         broken_heuristic=args.broken_heuristic,
         environment=dict(args.environment),
         executor=args.executor,
+        merge=args.merge,
     )
     return 0
 

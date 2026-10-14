@@ -6,6 +6,8 @@ conventions the Allure model expects, independent of the visitor traversal.
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import datetime
 
 from allure_commons.model2 import Status, StatusDetails
@@ -43,12 +45,28 @@ def to_ms(value: datetime | str | None) -> int | None:
     return None
 
 
+_HTML_BREAK = re.compile(r"<(?:br|hr)\s*/?>", re.IGNORECASE)
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def plain_message(message: str) -> str:
+    """Robot ``*HTML*`` messages (e.g. merge notes) as plain text; others unchanged.
+
+    Allure shows ``statusDetails.message`` as text, so markup would appear verbatim.
+    """
+    if not message.startswith("*HTML*"):
+        return message
+    text = _HTML_TAG.sub("", _HTML_BREAK.sub("\n", message[len("*HTML*") :]))
+    lines = (line.strip() for line in html.unescape(text).splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def status_details(item) -> StatusDetails | None:  # noqa: ANN001 - RF model object
     """Build ``StatusDetails`` from an item's message, or ``None`` if empty."""
     message = getattr(item, "message", None)
     if not message:
         return None
-    return StatusDetails(message=message)
+    return StatusDetails(message=plain_message(message))
 
 
 def _looks_like_error(item) -> bool:  # noqa: ANN001
@@ -70,7 +88,8 @@ def status_of(item, *, broken_heuristic: bool = False) -> tuple[str, StatusDetai
     """
     status = getattr(item, "status", None)
     if status == "PASS":
-        return Status.PASSED, None
+        # A passed item normally has no message; `Pass Execution` and merge notes do.
+        return Status.PASSED, status_details(item)
     if status in ("SKIP", "NOT RUN", "NOT_RUN", "NOT SET", "NOT_SET"):
         return Status.SKIPPED, status_details(item)
     if status == "FAIL":

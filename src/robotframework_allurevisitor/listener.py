@@ -81,6 +81,7 @@ class Listener:
             sink=self._sink,
             overlay=self._overlay,
         )
+        self._visitor.mapper.options.warn = robot_logger.warn
         self._keywords: list[str] = []  # result ids of running keywords
         self._scopes: list[str] = []  # result ids of running suites / test
         self._test_id: str | None = None

@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-13
+
+pabot, re-executed tests, and both together, with Browser screenshots and traces,
+verified end to end for the converter and the listener on Allure 2 and Allure 3.
+
+### Changed
+- **BREAKING (identity):** multiple sources (`rf-allure original.xml rerun.xml`)
+  are converted one by one instead of under a combined `A & B` root suite. Names,
+  suite labels, and `historyId` now equal a single-source conversion, so Allure
+  history lines up across runs. Results from earlier multi-source conversions
+  have a different `historyId`.
+- Each source resolves screenshots and traces against its own directory, not the
+  first source's.
+- Robot `*HTML*` status messages (e.g. `rebot --merge` notes) become plain text.
+  A passed test keeps its message (`Pass Execution`, merge notes).
+
+### Added
+- `rf-allure --merge` / `generate(..., merge=True)`: merge like `rebot --merge`
+  (last wins, one result per test), with every test keeping its own run's
+  screenshots and traces.
+- Warnings for screenshots that cannot be found (with a hint about pabot's
+  `--artifactsinsubfolders`), and for relative screenshots of re-executed tests
+  in a `rebot --merge` file.
+- Trace lookup in pabot layouts: prefixed `--artifacts` copies and
+  `pabot_results/<n>/browser/traces/`.
+- README section "Parallel runs and re-execution"; `robotframework-pabot` joins
+  the `browser` dependency group and its workflow tests.
+
 ## [0.3.0] - 2026-10-13
 
 A live listener that replaces `allure-robotframework`, sharing the converter's

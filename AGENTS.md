@@ -54,6 +54,8 @@ tests/
   test_sinks.py            # immediate vs deferred attachment copies
   test_equivalence.py      # listener output == converter output for one run
   test_e2e_listener.py     # listener output on Allure 2 + 3 (`e2e`)
+  test_sources.py          # multi-source identity, per-source files, --merge, merged messages
+  test_e2e_workflows.py    # pabot / rerun / pabot+rerun with Browser, both front ends (`browser`)
 ```
 
 ## Environment setup
@@ -120,7 +122,9 @@ labels, FAIL->failed, `skipped` tag); it keeps data-derived timestamps.
   relative to the `output.xml` directory.
 - Playwright traces: Browser's `trace file will be saved to: <zip>` message ->
   `application/vnd.allure.playwright-trace` attachment on the owning frame;
-  fallback `<output.xml dir>/browser/traces/<name>`. Never timestamp matching.
+  fallbacks under `<output.xml dir>`: `browser/traces/<name>`, pabot's prefixed
+  copy `browser/traces/*-<name>`, `pabot_results/*/browser/traces/<name>`.
+  Never timestamp matching.
 - All attachment files go through `AttachmentSink` (immediate copy here; a live
   front end can defer copies).
 
@@ -132,10 +136,18 @@ labels, FAIL->failed, `skipped` tag); it keeps data-derived timestamps.
   `[Teardown]` has its keyword on top and stays a step.
 - **Control structures use `type`/attributes for labels, not `.name`** — `For.name`
   and `If.name` are deprecated and warn in RF 8.
-- **Multiple sources combine, they do NOT last-wins merge.**
-  `ExecutionResult(*sources)` nests each source as a sibling sub-suite; identical
-  `historyId` makes Allure group them as retries. For a single deduplicated
-  result, pre-merge with `rebot --merge`.
+- **Each source is converted on its own** (`generate()` visits one
+  `ExecutionResult` per source, with that source's directory as `source_dir`).
+  There is never a combined `A & B` root, so names and `historyId` equal a
+  single-source conversion; repeated tests become Allure retries.
+- **`merge=True` / `--merge`** uses Robot's own `Merger` (exact `rebot --merge`
+  semantics) and a `{id(item): source_dir}` map of tests and suite fixtures, which
+  the merger moves into the first tree unchanged. The visitor's `source_dir_for`
+  hook switches `source_dir` per test and per suite fixture.
+- A **`rebot --merge` file** cannot tell which run a relative screenshot belongs
+  to: re-executed tests (detected by rebot's merge note, `rebot_merged()`) warn
+  when a relative screenshot resolves. Unresolvable screenshots always warn
+  (`MappingOptions.warn`; the listener routes it to Robot's log).
 - **Partial output**: `generate()` wraps parse+visit so a truncated `output.xml`
   warns instead of crashing. `ExecutionResult` parses eagerly, so an unparseable
   file recovers nothing — by design.
@@ -190,4 +202,9 @@ point is exercised) → real **Allure 2 and Allure 3** reports, parametrised ove
   normalise Allure 2 (`widgets/summary.json`, `data/test-cases/`) and Allure 3
   (`summary.json`, `data/test-results/`) data. Assert on data, never HTML.
 - `browser` tests need `uv sync --group browser` + `rfbrowser init chromium`
-  and skip when the Browser library or its browsers are unavailable.
+  and skip when the Browser library or its browsers are unavailable. The group
+  also holds robotframework-pabot for `test_e2e_workflows.py`, whose listener
+  results are the ground truth the converter is compared with (screenshot hashes).
+- `Report.test_cases()` hides earlier attempts (Allure 2 `retry`, Allure 3
+  `isRetry`; Allure 3's own `retry` key is set on every attempt) and gives each
+  case a `retries` count.

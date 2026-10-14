@@ -10,6 +10,8 @@ from __future__ import annotations
 import html
 import os
 import re
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +34,9 @@ from robotframework_allurevisitor._labels import suite_labels, tag_labels_and_li
 
 # Matches an <img src="..."> reference inside a Robot log message.
 _IMG_RE = re.compile(r"""<img[^>]+src=["']([^"']+)["']""", re.IGNORECASE)
+
+# Image sources that are not files on disk (nothing to attach, nothing to warn about).
+_NON_FILE_SRC = re.compile(r"^(?:https?:|data:)", re.IGNORECASE)
 
 # robotframework-browser announces trace archives in `New Context`:
 # "Successfully created context and trace file will be saved to: <path>.zip"
@@ -127,6 +132,8 @@ class MappingOptions:
     max_step_messages: int = field(
         default_factory=lambda: int(os.environ.get("ALLURE_MAX_STEP_MESSAGE_COUNT", "0") or 0)
     )
+    # Where conversion warnings go (the listener routes them to Robot's log).
+    warn: Callable[[str], None] = field(default=lambda message: print(message, file=sys.stderr))
 
 
 class Mapper:
@@ -135,6 +142,9 @@ class Mapper:
     def __init__(self, sink: AttachmentSink, options: MappingOptions | None = None) -> None:
         self.sink = sink
         self.options = options or MappingOptions()
+        # Name of the running test when rebot --merge took it from another output.xml:
+        # its relative screenshot paths point into that run's directory, not ours.
+        self.merged_from_elsewhere: str | None = None
         self._host = self.options.host or host_tag()
         self._platform = platform_label()
 
@@ -254,23 +264,35 @@ class Mapper:
         if match is None:
             return
         logged = Path(match.group("path"))
+        # Path(...).name would not split a Windows path on POSIX; split on both separators.
+        name = re.split(r"[\\/]", str(logged))[-1]
         # A deferring sink copies later: the trace is only written when its context closes.
         if logged.is_file() or self.sink.defers_files:
             trace = logged
         else:
-            trace = self._relocated_trace(logged)
+            trace = self._relocated_trace(name)
         if trace is not None:
-            self.sink.attach_file(owner, trace, name=trace.name, mime=PLAYWRIGHT_TRACE_MIME)
+            self.sink.attach_file(owner, trace, name=name, mime=PLAYWRIGHT_TRACE_MIME)
 
-    def _relocated_trace(self, logged: Path) -> Path | None:
-        # The run's output directory may have moved (e.g. a downloaded CI artifact);
-        # Browser keeps traces in <outputdir>/browser/traces next to output.xml.
+    def _relocated_trace(self, name: str) -> Path | None:
+        """Find a trace whose logged path no longer exists (moved output, pabot layouts)."""
         if self.options.source_dir is None:
             return None
-        # Path(...).name would not split a Windows path on POSIX; split on both separators.
-        name = re.split(r"[\\/]", str(logged))[-1]
-        candidate = self.options.source_dir / "browser" / "traces" / name
-        return candidate if candidate.is_file() else None
+        traces = self.options.source_dir / "browser" / "traces"
+        candidate = traces / name
+        if candidate.is_file():
+            return candidate
+        # pabot --artifacts copies traces as "<timestamp>-<n>-<name>", and without it
+        # they stay in pabot_results/<n>/. Names hold a uuid, so matches are unambiguous.
+        searches = (
+            (traces, f"*-{name}"),
+            (self.options.source_dir / "pabot_results", f"*/browser/traces/{name}"),
+        )
+        for base, pattern in searches:
+            for match in sorted(base.glob(pattern)):
+                if match.is_file():
+                    return match
+        return None
 
     def flush_messages(self, owner, buffer: list) -> None:  # noqa: ANN001
         """Emit buffered messages as one ``Keyword Log`` attachment or as sub-steps."""
@@ -298,17 +320,45 @@ class Mapper:
         for src in _IMG_RE.findall(html_text):
             resolved = self._resolve(src)
             if resolved is None:
+                self._warn_missing_image(src)
                 continue
+            if self.merged_from_elsewhere and not Path(src).is_absolute():
+                self.options.warn(
+                    f"warning: '{self.merged_from_elsewhere}' was merged by rebot --merge from "
+                    f"another output; its relative screenshots were resolved against "
+                    f"{self.options.source_dir} and may belong to a different run. "
+                    "Convert the original outputs with `rf-allure --merge` instead."
+                )
+                self.merged_from_elsewhere = None  # once per test
             mime = _IMAGE_MIME.get(resolved.suffix.lower(), "application/octet-stream")
             self.sink.attach_file(owner, resolved, name=resolved.name, mime=mime)
             attached = True
         return attached
+
+    def _warn_missing_image(self, src: str) -> None:
+        if _NON_FILE_SRC.match(src):
+            return
+        message = f"warning: screenshot not found, kept in the Keyword Log: {src}"
+        if not Path(src).is_absolute():
+            message += (
+                f" (looked in {self.options.source_dir}; for pabot output, "
+                "run pabot with --artifactsinsubfolders)"
+            )
+        self.options.warn(message)
 
     def _resolve(self, src: str) -> Path | None:
         path = Path(src)
         if not path.is_absolute() and self.options.source_dir is not None:
             path = self.options.source_dir / path
         return path if path.is_file() else None
+
+
+def rebot_merged(test) -> bool:  # noqa: ANN001
+    """Whether ``rebot --merge`` re-executed or added ``test`` from a later output."""
+    message = getattr(test, "message", "") or ""
+    return message.startswith("*HTML*") and (
+        'class="merge"' in message or "added from merged output" in message
+    )
 
 
 def _log_line(message) -> str:  # noqa: ANN001

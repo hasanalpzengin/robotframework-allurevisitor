@@ -92,6 +92,44 @@ Moved
     assert names == ["trace_context=moved.zip", "trace_context=win.zip"]
 
 
+def test_relocated_pabot_artifact_copy(robot, tmp_path):
+    # pabot --artifacts zip --artifactsinsubfolders: "<timestamp>-<n>-<name>" in browser/traces.
+    _zip(tmp_path / "browser" / "traces" / "20261013_140402-1-trace_context=copied.zip")
+    output_xml = robot(
+        f"""\
+*** Test Cases ***
+Copied
+    Log    {ANNOUNCE}/ci/run/pabot_results/1/browser/traces/trace_context=copied.zip
+"""
+    )
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    # The attachment keeps the name Browser logged, not pabot's prefixed copy name.
+    assert [trace["name"] for trace in _all_traces(results_dir)] == ["trace_context=copied.zip"]
+
+
+def test_relocated_pabot_results(robot, tmp_path):
+    # pabot without --artifacts: traces stay in pabot_results/<n>/browser/traces.
+    _zip(tmp_path / "pabot_results" / "0" / "browser" / "traces" / "trace_context=p0.zip")
+    _zip(tmp_path / "pabot_results" / "1" / "browser" / "traces" / "trace_context=p1.zip")
+    output_xml = robot(
+        f"""\
+*** Test Cases ***
+Process Zero
+    Log    {ANNOUNCE}/ci/run/pabot_results/0/browser/traces/trace_context=p0.zip
+
+Process One
+    Log    {ANNOUNCE}/ci/run/pabot_results/1/browser/traces/trace_context=p1.zip
+"""
+    )
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    names = sorted(trace["name"] for trace in _all_traces(results_dir))
+    assert names == ["trace_context=p0.zip", "trace_context=p1.zip"]
+
+
 def test_missing_trace_is_skipped(robot, tmp_path):
     output_xml = robot(
         f"*** Test Cases ***\nGone\n    Log    {ANNOUNCE}/nowhere/trace_context=gone.zip\n"

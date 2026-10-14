@@ -100,6 +100,7 @@ Coming from `allure-robotframework`? See the
 | `sources` | One or more `output.xml` files or globs (positional). |
 | `-o, --output` | Results directory (default `allure-results`). |
 | `--clean` | Remove existing files in the results directory first. |
+| `--merge` | Merge the sources like `rebot --merge` (last wins) into one result per test; without it, repeated tests become retries. See [re-execution](#re-executing-failed-tests). |
 | `--thread` | Thread label, e.g. a pabot worker id (drives the Timeline view). |
 | `--issue-pattern` | Pattern turning issue tags into Allure issue links. |
 | `--link-pattern` | Pattern turning link tags into Allure links. |
@@ -107,8 +108,8 @@ Coming from `allure-robotframework`? See the
 | `--environment KEY=VALUE` | Environment entry shown in the report (repeatable); writes `environment.properties`. |
 | `--executor JSON` | Executor info (inline JSON or a JSON file path); writes `executor.json`. |
 
-The same options are keyword arguments of `generate()` (`broken_heuristic=True`,
-`environment={...}`, `executor={...}`).
+The same options are keyword arguments of `generate()` (`merge=True`,
+`broken_heuristic=True`, `environment={...}`, `executor={...}`).
 
 ## What gets converted
 
@@ -170,27 +171,85 @@ messages are aggregated per step, step parameters are `arg1..N` instead of
 `arg0..N`, deep suite hierarchies label like the listener, and failures are
 `failed` unless `--broken-heuristic` is given. See [CHANGELOG.md](CHANGELOG.md).
 
-## Reruns, merges, and pabot
+## Parallel runs and re-execution
 
-Passing multiple sources combines them; because `historyId` is stable, repeated
-runs of the same test are grouped by Allure as **retries** with the latest
-attempt (by stop time) as the headline:
+These workflows are tested end to end with robotframework-browser screenshots and
+Playwright traces, on Allure 2 and Allure 3, for both the converter and the listener.
+
+Constraints these workflows depend on:
+
+- **Rerun into its own `--outputdir`.** Browser deletes `browser/` (screenshots,
+  traces) in its output directory at the start of every run, so a rerun into the
+  same directory destroys the first run's artifacts.
+- **Run pabot with `--artifactsinsubfolders`** when you convert its output. Without
+  it, pabot's merged `output.xml` points at screenshots that stay in
+  `pabot_results/<n>/`, and Robot's `log.html` breaks the same way. The converter
+  warns about every screenshot it cannot find. Traces are found either way.
+- **Merge with `rf-allure --merge`, not `rebot --merge`.** A rebot-merged file
+  cannot say which run's directory a relative screenshot path belongs to. Both runs
+  use the same file names, so the converter warns for every re-executed test.
+
+### pabot
 
 ```bash
-uv run rf-allure original.xml rerun.xml -o allure-results --clean
+# Listener: every process writes to one results directory, with a thread label per process.
+pabot --listener robotframework_allurevisitor.Listener:allure-results tests/
+
+# Converter
+pabot --artifacts png,zip --artifactsinsubfolders --outputdir out tests/
+rf-allure out/output.xml -o allure-results --clean
 ```
 
-For a single, deduplicated last-wins result, pre-merge with Robot's own tooling
-and convert the merged file:
+### Re-executing failed tests
 
 ```bash
-rebot --merge original.xml rerun.xml --output merged.xml
-uv run rf-allure merged.xml -o allure-results --clean
+robot --outputdir out tests/
+robot --rerunfailed out/output.xml --outputdir out/rerun tests/
 ```
 
-For **pabot**, either convert the single merged `output.xml`, or convert each
-worker's file with a distinct `--thread` — but never both into the same results
-directory (identical `historyId` would inflate counts).
+The tests that failed in `out/` and passed in `out/rerun/` can be reported in two ways:
+
+```bash
+# Retries (recommended): every attempt is kept. Allure shows the latest attempt and
+# lists the earlier ones as retries. historyId matches a single run, so history works.
+rf-allure out/output.xml out/rerun/output.xml -o allure-results --clean
+
+# Merged: one result per test, last wins, like `rebot --merge`, but each test keeps
+# the screenshots and traces of the run it came from.
+rf-allure --merge out/output.xml out/rerun/output.xml -o allure-results --clean
+```
+
+With the listener, pass the same results directory to both runs (and no
+`clean=True`). The attempts appear as retries:
+
+```bash
+robot --listener robotframework_allurevisitor.Listener:allure-results --outputdir out tests/
+robot --listener robotframework_allurevisitor.Listener:allure-results \
+      --rerunfailed out/output.xml --outputdir out/rerun tests/
+```
+
+A file merged by `rebot --merge` converts too: the merge note becomes plain text.
+It is still better to give `rf-allure` the original outputs, because of the
+screenshot paths described above.
+
+### pabot and re-execution together
+
+```bash
+pabot --artifacts png,zip --artifactsinsubfolders --outputdir out tests/
+pabot --artifacts png,zip --artifactsinsubfolders \
+      --rerunfailed out/output.xml --outputdir out/rerun tests/
+rf-allure out/output.xml out/rerun/output.xml -o allure-results --clean           # retries
+rf-allure --merge out/output.xml out/rerun/output.xml -o allure-results --clean   # merged
+```
+
+The listener works the same way: give both pabot runs the same
+`--listener robotframework_allurevisitor.Listener:allure-results`.
+
+Each source is converted on its own, so a test's name, suite labels, and
+`historyId` are the same whether a file is converted alone or with others.
+Converting each pabot worker's own `pabot_results/<n>/output.xml` with a distinct
+`--thread` also works. Never convert both the worker files and the merged file into
+one results directory: the same tests would be counted twice.
 
 ## History and categories: Allure 2 vs Allure 3
 
@@ -242,7 +301,9 @@ generator **skips** its tests; a generator that runs but fails **fails** them.
 CI sets `ALLURE_REQUIRE_GENERATORS=1` so an unavailable generator fails as well.
 
 The `browser` tests run real robotframework-browser suites with tracing and
-check the traces in both reports. They need the optional dependency group:
+screenshots, under pabot, with re-execution, and with both, and check each
+attempt's screenshots and traces in both reports, for both the converter and the
+listener. They need the optional dependency group (Browser and pabot):
 
 ```bash
 uv sync --group browser

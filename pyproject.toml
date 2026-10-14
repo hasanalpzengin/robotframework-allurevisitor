@@ -1,6 +1,6 @@
 [project]
 name = "robotframework-allurevisitor"
-version = "0.3.0"
+version = "0.4.0"
 description = "Allure 2/3 results for Robot Framework: convert output.xml or use the live listener that replaces allure-robotframework."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -43,6 +43,7 @@ allurevisitor = "robotframework_allurevisitor.cli:main"
 [dependency-groups]
 browser = [
     "robotframework-browser>=20.6.0",
+    "robotframework-pabot>=5.2.2",
 ]
 dev = [
     "pytest>=9.0.3",

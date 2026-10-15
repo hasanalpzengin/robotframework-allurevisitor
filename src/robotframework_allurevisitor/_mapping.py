@@ -347,10 +347,15 @@ class Mapper:
         self.options.warn(message)
 
     def _resolve(self, src: str) -> Path | None:
+        if _NON_FILE_SRC.match(src):
+            return None
         path = Path(src)
         if not path.is_absolute() and self.options.source_dir is not None:
             path = self.options.source_dir / path
-        return path if path.is_file() else None
+        try:
+            return path if path.is_file() else None
+        except OSError:  # e.g. ENAMETOOLONG
+            return None
 
 
 def rebot_merged(test) -> bool:  # noqa: ANN001

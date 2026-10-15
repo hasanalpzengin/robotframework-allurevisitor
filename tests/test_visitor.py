@@ -297,6 +297,19 @@ def test_messages_aggregated_into_keyword_log(robot, tmp_path):
     assert "went &lt;wrong&gt;" in text
 
 
+def test_embedded_base64_screenshot_does_not_stop_conversion(robot, tmp_path):
+    """A ``data:`` image (Browser ``EMBED`` screenshots) longer than NAME_MAX is not a path."""
+    src = "data:image/png;base64," + "A" * 5000
+    output_xml = robot(f'*** Test Cases ***\nEmbedded\n    Log    <img src="{src}">    html=True\n')
+    results_dir = tmp_path / "allure-results"
+    generate(output_xml, results_dir, clean=True)
+
+    (result,) = load_results(results_dir)
+    (attachment,) = result["steps"][0]["attachments"]
+    assert attachment["name"] == "Keyword Log"
+    assert src in _attachment_text(results_dir, attachment)
+
+
 def test_keyword_log_collects_all_messages_of_one_keyword(robot, tmp_path):
     """Several messages logged by one keyword end up in a single attachment."""
     output_xml = robot("*** Test Cases ***\nMany\n    Log Many    one    two    three\n")
